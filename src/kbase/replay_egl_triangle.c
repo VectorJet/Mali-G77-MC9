@@ -23,6 +23,9 @@
 #define OFF_COMPUTE  0x0100
 #define OFF_FRAG     0x0200
 #define OFF_SOFT3    0x0300
+#define OFF_HYBRID_FBD   0x4000
+#define OFF_HYBRID_RT    0x5000
+#define OFF_HYBRID_COLOR 0x6000
 
 struct base_dependency {
     uint8_t atom_id;
@@ -181,6 +184,30 @@ static void dump_words(const char *label, const void *buf, size_t size) {
     }
 }
 
+static void build_hybrid_fbd(void *cpu, uint64_t gva, uint64_t dcd_addr) {
+    uint8_t *base = cpu;
+    uint32_t *fbd = (uint32_t *)(base + OFF_HYBRID_FBD);
+    uint32_t *rt = (uint32_t *)(base + OFF_HYBRID_RT);
+    volatile uint32_t *color = (volatile uint32_t *)(base + OFF_HYBRID_COLOR);
+
+    memset(base + OFF_HYBRID_FBD, 0, 0x100);
+    memset(base + OFF_HYBRID_RT, 0, 0x40);
+    for (int i = 0; i < 64 * 64; i++) color[i] = 0xdeadbeef;
+
+    fbd[0] = 1;
+    fbd[2] = 0x00010000;
+    *(uint64_t *)((uint8_t *)fbd + 0x18) = dcd_addr;
+
+    fbd[0x80 / 4 + 0] = 64;
+    fbd[0x80 / 4 + 1] = 64;
+    fbd[0x80 / 4 + 2] = 0x2;
+    fbd[0x80 / 4 + 3] = 0;
+    *(uint64_t *)((uint8_t *)fbd + 0xa0) = gva + OFF_HYBRID_RT;
+
+    *(uint64_t *)((uint8_t *)rt + 0x00) = gva + OFF_HYBRID_COLOR;
+    rt[2] = 64 * 4;
+}
+
 static void drain_events(int fd) {
     for (int i = 0; i < 8; i++) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -271,6 +298,38 @@ int main(int argc, char **argv) {
         printf("zeroed relocated fc2540 region inside 0x5efffc2000 at 0x%llx\n",
                (unsigned long long)(rt->new_addr + 0x540));
         mode = "hw2";
+    } else if (strcmp(mode, "hw2_hybrid_fbd") == 0) {
+        uint64_t dcd_addr = *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x18);
+        build_hybrid_fbd(cpu, gva, dcd_addr);
+        *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x28) = (gva + OFF_HYBRID_FBD) | 1ULL;
+        printf("built hybrid FBD at 0x%llx RT at 0x%llx color at 0x%llx\n",
+               (unsigned long long)(gva + OFF_HYBRID_FBD),
+               (unsigned long long)(gva + OFF_HYBRID_RT),
+               (unsigned long long)(gva + OFF_HYBRID_COLOR));
+        mode = "hw2";
+    } else if (strcmp(mode, "hw2_hybrid_fbd_dcd28_color") == 0) {
+        uint64_t dcd_addr = *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x18);
+        uint8_t *dcd_cpu = (uint8_t *)cpu + (dcd_addr - gva);
+        build_hybrid_fbd(cpu, gva, dcd_addr);
+        *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x28) = (gva + OFF_HYBRID_FBD) | 1ULL;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_FBD + 0x18) = dcd_addr;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_FBD + 0xa0) = gva + OFF_HYBRID_RT;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_RT + 0x00) = gva + OFF_HYBRID_COLOR;
+        *(uint64_t *)(dcd_cpu + 0x28) = gva + OFF_HYBRID_COLOR;
+        printf("built hybrid FBD and patched DCD+0x28 to color buffer 0x%llx\n",
+               (unsigned long long)(gva + OFF_HYBRID_COLOR));
+        mode = "hw2";
+    } else if (strcmp(mode, "hw3_hybrid_fbd_dcd28_color_soft3") == 0) {
+        uint64_t dcd_addr = *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x18);
+        uint8_t *dcd_cpu = (uint8_t *)cpu + (dcd_addr - gva);
+        build_hybrid_fbd(cpu, gva, dcd_addr);
+        *(uint64_t *)((uint8_t *)cpu + OFF_FRAG + 0x28) = (gva + OFF_HYBRID_FBD) | 1ULL;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_FBD + 0x18) = dcd_addr;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_FBD + 0xa0) = gva + OFF_HYBRID_RT;
+        *(uint64_t *)((uint8_t *)cpu + OFF_HYBRID_RT + 0x00) = gva + OFF_HYBRID_COLOR;
+        *(uint64_t *)(dcd_cpu + 0x28) = gva + OFF_HYBRID_COLOR;
+        printf("built hybrid FBD + DCD patch and will include soft atom 3\n");
+        mode = "hw3";
     }
 
     dump_words("soft0", (uint8_t *)cpu + OFF_SOFT0, 64);
@@ -311,6 +370,78 @@ int main(int argc, char **argv) {
                        now[first]);
             }
         }
+        volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + OFF_HYBRID_COLOR);
+        int changed = 0;
+        for (int i = 0; i < 64 * 64; i++) {
+            if (color[i] != 0xdeadbeef) {
+                changed++;
+                if (changed <= 8) {
+                    printf("hybrid_color[%d]=0x%08x\n", i, color[i]);
+                }
+            }
+        }
+        printf("hybrid color changed=%d first=0x%08x center=0x%08x\n",
+               changed, color[0], color[(32 * 64) + 32]);
+        free(baseline);
+        munmap(cpu, total_pages * PAGE_SIZE);
+        close(fd);
+        return 0;
+    } else if (strcmp(mode, "hw3") == 0) {
+        struct kbase_atom_mtk replay_atoms[3];
+        memset(replay_atoms, 0, sizeof(replay_atoms));
+        replay_atoms[0] = atoms[1];
+        replay_atoms[1] = atoms[2];
+        replay_atoms[2] = atoms[3];
+
+        replay_atoms[0].atom_number = 1;
+        replay_atoms[0].pre_dep[0].atom_id = 0;
+        replay_atoms[0].pre_dep[0].dep_type = 0;
+        replay_atoms[0].pre_dep[1].atom_id = 0;
+        replay_atoms[0].pre_dep[1].dep_type = 0;
+
+        replay_atoms[1].atom_number = 2;
+        replay_atoms[1].pre_dep[0].atom_id = 1;
+        replay_atoms[1].pre_dep[0].dep_type = 1;
+        replay_atoms[1].pre_dep[1].atom_id = 0;
+        replay_atoms[1].pre_dep[1].dep_type = 0;
+
+        replay_atoms[2].atom_number = 3;
+        replay_atoms[2].pre_dep[0].atom_id = 2;
+        replay_atoms[2].pre_dep[0].dep_type = 2;
+        replay_atoms[2].pre_dep[1].atom_id = 0;
+        replay_atoms[2].pre_dep[1].dep_type = 0;
+
+        submit.addr = (uint64_t)replay_atoms;
+        submit.nr_atoms = 3;
+        submit.stride = sizeof(struct kbase_atom_mtk);
+        int ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &submit);
+        printf("JOB_SUBMIT ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+        drain_events(fd);
+        for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+            uint8_t *now = (uint8_t *)cpu + 0x10000 + i * PAGE_SIZE;
+            if (memcmp(now, baseline + i * PAGE_SIZE, PAGE_SIZE) != 0) {
+                size_t first = 0;
+                while (first < PAGE_SIZE && now[first] == baseline[i * PAGE_SIZE + first]) first++;
+                printf("page changed: orig=0x%llx new=0x%llx first_diff=0x%zx before=%02x after=%02x\n",
+                       (unsigned long long)pages[i].orig_page,
+                       (unsigned long long)pages[i].new_addr,
+                       first,
+                       baseline[i * PAGE_SIZE + first],
+                       now[first]);
+            }
+        }
+        volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + OFF_HYBRID_COLOR);
+        int changed = 0;
+        for (int i = 0; i < 64 * 64; i++) {
+            if (color[i] != 0xdeadbeef) {
+                changed++;
+                if (changed <= 8) {
+                    printf("hybrid_color[%d]=0x%08x\n", i, color[i]);
+                }
+            }
+        }
+        printf("hybrid color changed=%d first=0x%08x center=0x%08x\n",
+               changed, color[0], color[(32 * 64) + 32]);
         free(baseline);
         munmap(cpu, total_pages * PAGE_SIZE);
         close(fd);

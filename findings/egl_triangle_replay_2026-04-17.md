@@ -126,6 +126,51 @@ Interpretation:
 
 This is the strongest replay result so far.
 
+### Render-target probe modes
+
+Additional replay probes were added:
+
+- `hw2_zero_fc4000`
+- `hw2_zero_fc2540`
+- `hw2_hybrid_fbd`
+- `hw2_hybrid_fbd_dcd28_color`
+- `hw3_hybrid_fbd_dcd28_color_soft3`
+
+Observed results:
+
+- zeroing the entire relocated `fc4000` page still allows atom 2 to complete
+- zeroing the `fc2540` region inside `fc2000` still allows atom 2 to complete
+- replacing the vendor FBD/RT chain with a simple owned SFBD/RT chain still allows atom 2 to complete, but the owned color buffer stays unchanged
+- additionally patching `fragment DCD + 0x28` to the owned color buffer still allows atom 2 to complete, but the owned color buffer stays unchanged
+
+This means:
+
+- neither `fc4000` nor `fc2540` alone is the decisive execution dependency
+- the fragment hardware atom can complete even when those regions are replaced or redirected
+- visible output is therefore still being resolved through some other packed render-target state path
+
+### Soft-tail replay test
+
+Tested a 3-atom chain:
+
+- compute
+- fragment
+- captured soft atom 3
+
+with the hybrid owned FBD + `DCD+0x28 -> owned color` setup.
+
+Result:
+
+- atom 1 completed: event `0x4`
+- atom 2 completed: event `0x4`
+- atom 3 failed: event `0x4003` (`JOB_INVALID`)
+- owned color buffer remained unchanged
+
+Interpretation:
+
+- the captured tail soft job is not trivially portable outside the original vendor process
+- it is not currently giving us the missing "resolve to owned output" step
+
 ## Why There Is Still No Visible Output
 
 Even though the compute + fragment chain completes successfully:
@@ -153,6 +198,7 @@ Observations:
 
 - `0x5efffc4000` does not look like a simple linear color buffer pointer page
 - `0x5efffc2540` inside the `fc2000` page looks like structured state / LUT-style data, not a direct pointer table
+- the fragment FAU target page `0x5effe9d000` is still being mutated during replay even when the owned color path is injected
 - replay completion without visible output is therefore consistent with the fragment stage still resolving its actual render target through packed descriptor state that we have not yet retargeted
 
 ## Current Conclusion
