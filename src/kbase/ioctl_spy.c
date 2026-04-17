@@ -14,7 +14,6 @@
 #include <android/log.h>
 
 #define LOG_TAG "mali_ioctl_spy"
-#define spy_log(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 /* Output directory for binary captures on device */
 #define CAPTURE_DIR "/data/local/tmp/mali_capture"
@@ -54,6 +53,22 @@ struct kbase_atom_mtk {
 static int (*real_ioctl)(int fd, int request, ...) = NULL;
 static int spy_enabled = 1;
 static int dump_count = 0;
+
+static void spy_log_impl(const char *fmt, ...) {
+    va_list ap_log;
+    va_start(ap_log, fmt);
+    __android_log_vprint(ANDROID_LOG_DEBUG, LOG_TAG, fmt, ap_log);
+    va_end(ap_log);
+
+    va_list ap_stderr;
+    va_start(ap_stderr, fmt);
+    fprintf(stderr, "[mali_ioctl_spy] ");
+    vfprintf(stderr, fmt, ap_stderr);
+    fprintf(stderr, "\n");
+    va_end(ap_stderr);
+}
+
+#define spy_log(...) spy_log_impl(__VA_ARGS__)
 
 static void dump_memory(uint64_t addr, size_t size, const char *prefix) {
     const uint8_t *p = (const uint8_t *)(uintptr_t)addr;
@@ -145,6 +160,66 @@ static int safe_write_capture(const char *name, uint64_t va, size_t size) {
     return 1;
 }
 
+static int is_candidate_pointer(uint64_t ptr) {
+    return ptr >= 0x10000ULL && ptr < 0x800000000000ULL;
+}
+
+static void dump_atom_meta(const struct kbase_atom_mtk *atom, int atom_idx) {
+    spy_log("[SPY_ATOM] atom[%d]: seq=0x%llx jc=0x%llx atom_number=%u core_req=0x%x prio=%u device=%u jobslot=%u frame=%u renderpass=%u",
+            atom_idx,
+            (unsigned long long)atom->seq_nr,
+            (unsigned long long)atom->jc,
+            atom->atom_number,
+            atom->core_req,
+            atom->prio,
+            atom->device_nr,
+            atom->jobslot,
+            atom->frame_nr,
+            atom->renderpass_id);
+    spy_log("[SPY_ATOM] atom[%d]: pre_dep0=(atom=%u,type=%u) pre_dep1=(atom=%u,type=%u) nr_extres=%u extres=0x%llx udata=[0x%llx,0x%llx]",
+            atom_idx,
+            atom->pre_dep[0].atom_id, atom->pre_dep[0].dep_type,
+            atom->pre_dep[1].atom_id, atom->pre_dep[1].dep_type,
+            atom->nr_extres,
+            (unsigned long long)atom->extres_list,
+            (unsigned long long)atom->udata[0],
+            (unsigned long long)atom->udata[1]);
+}
+
+static void capture_pointer_closure(const char *prefix, int atom_idx,
+                                    const uint64_t *words, int nr_words,
+                                    int max_unique_pages) {
+    uint64_t pages[32];
+    int n_pages = 0;
+
+    for (int i = 0; i < nr_words && n_pages < max_unique_pages; i++) {
+        uint64_t ptr = words[i];
+        uint64_t page = ptr & ~0xFFFULL;
+        if (!is_candidate_pointer(ptr) || !probe_readable(page, 256)) continue;
+
+        int seen = 0;
+        for (int j = 0; j < n_pages; j++) {
+            if (pages[j] == page) { seen = 1; break; }
+        }
+        if (seen) continue;
+
+        pages[n_pages++] = page;
+
+        char fn_page[96];
+        char fn_pagehex[96];
+        char fn_head[96];
+        snprintf(fn_page, sizeof(fn_page), "atom%d_%s_page%d", atom_idx, prefix, n_pages - 1);
+        snprintf(fn_pagehex, sizeof(fn_pagehex), "atom%d_%s_page_%llx", atom_idx, prefix,
+                 (unsigned long long)page);
+        snprintf(fn_head, sizeof(fn_head), "atom%d_%s_ptr%d", atom_idx, prefix, i);
+        safe_write_capture(fn_page, page, 4096);
+        safe_write_capture(fn_pagehex, page, 4096);
+        safe_write_capture(fn_head, ptr & ~0x3FULL, 256);
+        spy_log("[SPY_CAPTURE] %s word[%d] -> ptr=0x%llx page=0x%llx",
+                prefix, i, ptr, page);
+    }
+}
+
 /* Read a 64-bit address from a 32-bit word array at the given word index */
 static uint64_t read_addr64(const uint32_t *words, int word_idx) {
     return ((uint64_t)words[word_idx + 1] << 32) | words[word_idx];
@@ -153,8 +228,18 @@ static uint64_t read_addr64(const uint32_t *words, int word_idx) {
 static void analyze_and_dump_job(const struct kbase_atom_mtk *atom, int atom_idx) {
     uint32_t req = atom->core_req;
     int is_soft_job = (req & (1 << 9)); // BASE_JD_REQ_SOFT_JOB
-    
-    if (is_soft_job) return; // Skip soft jobs
+
+    if (is_soft_job) {
+        spy_log("[SPY_DUMP] SOFT ATOM %d: jc=0x%llx core_req=0x%x jobslot=%d",
+                atom_idx, atom->jc, atom->core_req, atom->jobslot);
+        if (atom->jc && probe_readable(atom->jc, 64)) {
+            safe_dump_memory(atom->jc, 64, "[SPY_SOFT_JC]");
+            char name[64];
+            snprintf(name, sizeof(name), "atom%d_soft_jc", atom_idx);
+            safe_write_capture(name, atom->jc, 64);
+        }
+        return;
+    }
 
     if (atom->jc == 0) return;
 
@@ -179,6 +264,11 @@ static void analyze_and_dump_job(const struct kbase_atom_mtk *atom, int atom_idx
     else dump_size = 128;
 
     dump_memory(atom->jc, dump_size, "[SPY_DUMP_JC]");
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "atom%d_hw_jc", atom_idx);
+        safe_write_capture(name, atom->jc, dump_size);
+    }
 
     // ===================== COMPUTE JOB (Type 4) =====================
     // Follow the Shader Environment pointers to capture:
@@ -303,6 +393,119 @@ static void analyze_and_dump_job(const struct kbase_atom_mtk *atom, int atom_idx
                         char name2[64];
                         snprintf(name2, sizeof(name2), "atom%d_frag_shader_dcd", atom_idx);
                         safe_write_capture(name2, actual_dcd, 128);
+                        if (probe_readable(actual_dcd & ~0xFFFULL, 4096)) {
+                            const uint64_t *dcd_page = (const uint64_t *)(uintptr_t)(actual_dcd & ~0xFFFULL);
+                            capture_pointer_closure("frag_dcd_page", atom_idx, dcd_page, 512, 8);
+                        }
+
+                        // Follow DCD Shader Environment pointers (same layout as Compute SE)
+                        // DCD+0x60: Resources, DCD+0x68: Shader ISA, DCD+0x70: TLS, DCD+0x78: FAU
+                        if (probe_readable(actual_dcd, 128)) {
+                            const uint32_t *dcd_w = (const uint32_t *)(uintptr_t)actual_dcd;
+                            uint8_t frag_fau_count = dcd_w[17] & 0xFF;  // DCD word 17 = offset 0x44
+
+                            uint64_t frag_res_va  = read_addr64(dcd_w, 24);  // DCD+0x60
+                            uint64_t frag_isa_va  = read_addr64(dcd_w, 26);  // DCD+0x68
+                            uint64_t frag_tls_va  = read_addr64(dcd_w, 28);  // DCD+0x70
+                            uint64_t frag_fau_va  = read_addr64(dcd_w, 30);  // DCD+0x78
+
+                            spy_log("[SPY_DUMP]   -> Frag DCD SE: res=0x%llx isa=0x%llx tls=0x%llx fau=0x%llx fau_count=%u",
+                                    frag_res_va, frag_isa_va, frag_tls_va, frag_fau_va, frag_fau_count);
+
+                            // Capture Fragment Shader ISA
+                            if (frag_isa_va && probe_readable(frag_isa_va, 256)) {
+                                size_t fisa_size = 256;
+                                if (probe_readable(frag_isa_va, 4096))
+                                    fisa_size = estimate_shader_size((const uint8_t *)(uintptr_t)frag_isa_va, 4096);
+                                spy_log("[SPY_DUMP]   -> Frag Shader ISA %zu bytes at 0x%llx", fisa_size, frag_isa_va);
+                                char fn[64];
+                                snprintf(fn, sizeof(fn), "atom%d_frag_shader_isa", atom_idx);
+                                safe_write_capture(fn, frag_isa_va, fisa_size);
+                            }
+
+                            // Capture Fragment FAU
+                            if (frag_fau_va && frag_fau_count > 0) {
+                                size_t fsz = frag_fau_count * 8;
+                                char fn[64];
+                                snprintf(fn, sizeof(fn), "atom%d_frag_fau", atom_idx);
+                                safe_write_capture(fn, frag_fau_va, fsz);
+
+                                /* Also capture the auxiliary state referenced by FAU[0].
+                                 * Multi-capture analysis shows the fragment ISA embeds:
+                                 *   FAU[0], frag_isa+0x20, frag_isa+0x40,
+                                 *   frag_fau-0x700, frag_fau-0x3ff
+                                 * so dump both the direct FAU[0] target and a wider window
+                                 * around the FAU area used by those relocations.
+                                 */
+                                if (probe_readable(frag_fau_va, 8)) {
+                                    uint64_t fau0_target = *(const uint64_t *)(uintptr_t)frag_fau_va;
+                                    spy_log("[SPY_DUMP]   -> Frag FAU[0] target = 0x%llx", fau0_target);
+
+                                    if (fau0_target) {
+                                        uint64_t target_base = fau0_target & ~0x3FULL;
+                                        char fn2[64];
+                                        snprintf(fn2, sizeof(fn2), "atom%d_frag_fau0_target", atom_idx);
+                                        safe_write_capture(fn2, target_base, 512);
+
+                                        char fn2b[64];
+                                        snprintf(fn2b, sizeof(fn2b), "atom%d_frag_fau0_target_page", atom_idx);
+                                        safe_write_capture(fn2b, target_base & ~0xFFFULL, 4096);
+
+                                        if (probe_readable(target_base, 64)) {
+                                            const uint64_t *q = (const uint64_t *)(uintptr_t)target_base;
+                                            capture_pointer_closure("frag_fau0", atom_idx, q, 8, 8);
+                                        }
+
+                                        if (probe_readable(target_base & ~0xFFFULL, 4096)) {
+                                            const uint64_t *qp = (const uint64_t *)(uintptr_t)(target_base & ~0xFFFULL);
+                                            capture_pointer_closure("frag_fau0_page", atom_idx, qp, 512, 16);
+                                        }
+                                    }
+
+                                    if (frag_fau_va >= 0x800) {
+                                        uint64_t aux_base = (frag_fau_va - 0x800) & ~0x3FULL;
+                                        char fn3[64];
+                                        char fn4[64];
+                                        snprintf(fn3, sizeof(fn3), "atom%d_frag_aux_window", atom_idx);
+                                        snprintf(fn4, sizeof(fn4), "atom%d_frag_big_window", atom_idx);
+                                        safe_write_capture(fn3, aux_base, 0x1000);
+                                        safe_write_capture(fn4, aux_base, 0x4000);
+
+                                        /* Also sweep neighboring pages around the fragment FAU area.
+                                         * This helps capture the original driver/job arena contiguously,
+                                         * not just pointer-followed islands.
+                                         */
+                                        uint64_t center_page = frag_fau_va & ~0xFFFULL;
+                                        for (int rel = -8; rel <= 8; rel++) {
+                                            uint64_t page = center_page + (int64_t)rel * 0x1000;
+                                            if (!probe_readable(page, 4096)) continue;
+                                            char fnp[96];
+                                            snprintf(fnp, sizeof(fnp), "atom%d_frag_arena_page_%llx", atom_idx,
+                                                     (unsigned long long)page);
+                                            safe_write_capture(fnp, page, 4096);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Capture Fragment TLS
+                            if (frag_tls_va) {
+                                char fn[64];
+                                snprintf(fn, sizeof(fn), "atom%d_frag_tls", atom_idx);
+                                safe_write_capture(fn, frag_tls_va, 32);
+                                if (probe_readable(frag_tls_va & ~0xFFFULL, 4096)) {
+                                    const uint64_t *tls_page = (const uint64_t *)(uintptr_t)(frag_tls_va & ~0xFFFULL);
+                                    capture_pointer_closure("frag_tls_page", atom_idx, tls_page, 512, 8);
+                                }
+                            }
+
+                            // Capture Fragment Resources
+                            if (frag_res_va && probe_readable(frag_res_va, 32)) {
+                                char fn[64];
+                                snprintf(fn, sizeof(fn), "atom%d_frag_resources", atom_idx);
+                                safe_write_capture(fn, frag_res_va, 64);
+                            }
+                        }
                     }
                 }
             }
@@ -366,7 +569,9 @@ int ioctl(int fd, int request, ...) {
             capture_seq++;
             spy_log("Intercepted JOB_SUBMIT #%d with %d atoms", capture_seq, submit->nr_atoms);
             const struct kbase_atom_mtk *atoms = (const struct kbase_atom_mtk *)(uintptr_t)submit->addr;
+            write_capture_file("atoms_raw", atoms, submit->nr_atoms * submit->stride);
             for (uint32_t i = 0; i < submit->nr_atoms; i++) {
+                dump_atom_meta(&atoms[i], i);
                 analyze_and_dump_job(&atoms[i], i);
             }
             dump_count++;

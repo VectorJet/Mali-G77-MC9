@@ -201,3 +201,87 @@ The difference between "color cleared to 0" (0x00000000) and "color = 0x00000001
 - findings/gpu_execution_breakthrough.md
 - findings/job_chaining_investigation.md
 - findings/multi_job_sequential_drain.md
+
+---
+
+# UPDATE 2026-04-16: Valhall Job Type Corrections
+
+## Critical Discovery
+
+The tests from April 15 were using **wrong job types**! The Mali-G77 Valhall architecture uses different job type numbers than expected:
+
+| Old (Wrong) | Correct Valhall | Description |
+|-------------|-----------------|-------------|
+| 2 | 2 | WRITE_VALUE |
+| 3 | 3 | CACHE_FLUSH (not Vertex!) |
+| 4 | 4 | COMPUTE (used by Chrome for vertex) |
+| 4 | 7 | TILER (the real tiling job) |
+| 5 | 9 | FRAGMENT |
+| 10 | 10 | INDEXED_VERTEX |
+| 11 | 11 | MALLOC_VERTEX (384-byte aggregate) |
+
+## Chrome's Actual Usage
+
+Chrome uses **Type 4 (Compute)** for vertex processing, NOT Type 11 (Malloc Vertex)! This is much simpler.
+
+## Next Steps
+
+1. Update tests to use correct Valhall job types:
+   - Type 4 (Compute) for vertex shader processing
+   - Type 7 (Tiler) for binning
+   - Type 9 (Fragment) for pixel shading
+2. Get Valhall ISA binary (either capture from EGL or use Panfrost compiler)
+
+---
+
+# UPDATE 2026-04-17: Valhall Job Types WORK!
+
+Tested correct Valhall job types:
+- Type 2: WRITE_VALUE (polygon list init)
+- Type 4: COMPUTE (vertex processing) 
+- Type 7: TILER (tiling/binning)
+- Type 9: FRAGMENT (pixel shading)
+
+Result: **Color changed from 0xDEADBEEF to 0x00000001** - pipeline is executing!
+
+The remaining challenge: Need actual Vertex Shader ISA binary and proper vertex data.
+
+---
+
+# UPDATE 2026-04-17 (continued)
+
+## Shader Capture Attempts
+
+Tried capturing shader ISA from various sources:
+1. **egl_triangle** (Termux EGL) - Not using Mali GPU (software renderer)
+2. **egl_dumper** - Termux app-context run failed; needs standalone `/data/local/tmp` root launch to bypass vendor linker namespace isolation
+3. **Chrome with ioctl_spy** - No JOB_SUBMIT intercepted (wrap requires process restart)
+
+## Chrome Memory Analysis (from prior capture)
+
+Chrome's Compute job (type 4) Shader Environment:
+- Resources: 0x5effd8e5c8
+- **Shader ISA: 0x5effffe000** <- We need this binary!
+- Thread Storage: 0x5effd8e640
+- FAU: 0x5effd8e700
+
+The actual shader binary was at GPU VA 0x5effffe000 but we didn't capture its contents.
+
+## Current Status
+
+- Valhall job types 2/4/7/9 confirmed working (color changes from 0xDEADBEEF to 0x00000001)
+- Fragment job alone clears color buffer (shader executed, cleared to 0)
+- Need actual shader ISA binary for visible color output
+
+## Chrome Capture Attempts
+
+Multiple attempts to capture shader ISA from Chrome with ioctl_spy:
+- Set wrap.com.android.chrome property with LD_PRELOAD
+- Chrome process runs (visible in logcat as ChromeChildSurface)
+- But no JOB_SUBMIT intercepted by spy - maybe different process layer
+
+## Next Steps
+
+1. Try capturing from native Android game/app (more direct GPU usage)
+2. Manually construct minimal Valhall shader instructions
+3. Try different spy approach - hook at different layer
