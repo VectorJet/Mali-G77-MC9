@@ -25,7 +25,20 @@
 #define OFF_SOFT3    0x0300
 #define OFF_HYBRID_FBD   0x4000
 #define OFF_HYBRID_RT    0x5000
-#define OFF_HYBRID_COLOR 0x6000
+#define OFF_HYBRID_COLOR 0x30000
+
+/* Scratch MFBD layout offsets */
+#define OFF_SCRATCH_MFBD      0x6000
+#define OFF_SCRATCH_RT        (OFF_SCRATCH_MFBD + 0x80)
+#define OFF_SCRATCH_DCD       0x6100
+#define OFF_SCRATCH_TILER     0x6200
+#define OFF_SCRATCH_POLYLIST  0x7000
+#define OFF_SCRATCH_HEAP      0x8000
+#define OFF_SCRATCH_TLS       0x9000
+#define OFF_SCRATCH_COLOR     0xA000
+#define OFF_SCRATCH_COLOR_LG  0x40000
+#define OFF_SCRATCH_FRAG_JC   0xB000
+#define OFF_SCRATCH_SAMPLELOC 0xB100
 
 struct base_dependency {
     uint8_t atom_id;
@@ -208,6 +221,74 @@ static void build_hybrid_fbd(void *cpu, uint64_t gva, uint64_t dcd_addr) {
     rt[2] = 64 * 4;
 }
 
+static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64_t color_off) {
+    uint8_t *base = (uint8_t *)cpu;
+
+    memset(base + OFF_SCRATCH_MFBD, 0, OFF_SCRATCH_FRAG_JC + 0x1000 - OFF_SCRATCH_MFBD);
+
+    volatile uint32_t *color = (volatile uint32_t *)(base + color_off);
+    for (int i = 0; i < fb_w * fb_h; i++) color[i] = 0xdeadbeef;
+
+    /* === Bifrost Framebuffer Parameters (MFBD+0x00, 32 bytes) === */
+    uint32_t *mfbd = (uint32_t *)(base + OFF_SCRATCH_MFBD);
+    mfbd[0] = 0;  /* All Pre/Post Frame modes = Never */
+    {
+        uint16_t *sl = (uint16_t *)(base + OFF_SCRATCH_SAMPLELOC);
+        memset(sl, 0, 192);
+        sl[0] = 128; sl[1] = 128;
+        for (int i = 1; i < 32; i++) { sl[i*2] = 0; sl[i*2+1] = 256; }
+        sl[64] = 128; sl[65] = 128;
+    }
+    *(uint64_t *)(base + OFF_SCRATCH_MFBD + 0x10) = gva + OFF_SCRATCH_SAMPLELOC;
+
+    /* === Multi-Target Framebuffer Parameters (MFBD+0x20, 24 bytes) === */
+    uint32_t *params = (uint32_t *)(base + OFF_SCRATCH_MFBD + 0x20);
+    params[0] = (fb_w - 1) | ((fb_h - 1) << 16);
+    params[1] = 0;
+    params[2] = (fb_w - 1) | ((fb_h - 1) << 16);
+    params[3] = (0 << 0) | (2 << 6) | (8 << 9) | (0 << 19) | (1 << 24);
+    params[4] = (1 << 16);  /* Z Internal Format = D24 */
+
+    /* === RT0 descriptor (MFBD+0x80, 64 bytes) === */
+    uint32_t *rt = (uint32_t *)(base + OFF_SCRATCH_RT);
+    rt[0] = (1 << 26);    /* Internal Format = R8G8B8A8 */
+    uint32_t swizzle_rgba = (0 << 0) | (1 << 3) | (2 << 6) | (3 << 9);
+    rt[1] = (1 << 0) | (19 << 3) | (2 << 8) | (1 << 15) | (swizzle_rgba << 16) | (1u << 31);
+    *(uint64_t *)(base + OFF_SCRATCH_RT + 0x20) = gva + color_off;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x28) = fb_w * 4;
+    uint32_t clear_red = 0xFF0000FF;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x30) = clear_red;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x34) = clear_red;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x38) = clear_red;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x3C) = clear_red;
+
+    /* === DCD / Renderer State (64 bytes) === */
+    uint32_t *dcd = (uint32_t *)(base + OFF_SCRATCH_DCD);
+    dcd[8] = 0xFFFF | (7 << 24);
+
+    /* === Bifrost Tiler struct (192 bytes) === */
+    uint32_t *tiler = (uint32_t *)(base + OFF_SCRATCH_TILER);
+    *(uint64_t *)(tiler + 0) = gva + OFF_SCRATCH_POLYLIST;
+    tiler[2] = 0x1;
+    tiler[3] = (fb_w - 1) | ((fb_h - 1) << 16);
+    *(uint64_t *)(tiler + 6) = gva + OFF_SCRATCH_HEAP;
+
+    /* === Fragment Job (64 bytes at OFF_SCRATCH_FRAG_JC) === */
+    uint32_t *jc = (uint32_t *)(base + OFF_SCRATCH_FRAG_JC);
+    jc[4] = (1 << 0) | (9 << 1);
+    jc[8] = 0;
+    jc[9] = ((fb_w / 16) - 1) | (((fb_h / 16) - 1) << 16);
+    *(uint64_t *)(jc + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;
+
+    printf("scratch_fbd: %dx%d MFBD at gpu 0x%llx\n", fb_w, fb_h, (unsigned long long)(gva + OFF_SCRATCH_MFBD));
+    printf("scratch_fbd: color buf at gpu 0x%llx (%d bytes)\n", (unsigned long long)(gva + color_off), fb_w * fb_h * 4);
+    printf("scratch_fbd: frag JC at gpu 0x%llx bounds max=(%d,%d)\n",
+           (unsigned long long)(gva + OFF_SCRATCH_FRAG_JC), (fb_w / 16) - 1, (fb_h / 16) - 1);
+    dump_words("scratch MFBD", base + OFF_SCRATCH_MFBD, 0x80);
+    dump_words("scratch RT0", base + OFF_SCRATCH_RT, 0x40);
+    dump_words("scratch frag JC", base + OFF_SCRATCH_FRAG_JC, 0x40);
+}
+
 static void drain_events(int fd) {
     for (int i = 0; i < 8; i++) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -245,7 +326,7 @@ int main(int argc, char **argv) {
     uint32_t flags = 0;
     if (ioctl(fd, KBASE_IOCTL_SET_FLAGS, &flags) < 0) { perror("SET_FLAGS"); return 1; }
 
-    size_t total_pages = 64;
+    size_t total_pages = 256;
     uint64_t mem[4] = { total_pages, total_pages, 0, 0x200F };
     if (ioctl(fd, KBASE_IOCTL_MEM_ALLOC, mem) < 0) { perror("MEM_ALLOC"); return 1; }
     void *cpu = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem[1]);
@@ -278,6 +359,54 @@ int main(int argc, char **argv) {
     atoms[1].jc = gva + OFF_COMPUTE;
     atoms[2].jc = gva + OFF_FRAG;
     atoms[3].jc = gva + OFF_SOFT3;
+
+    if (strcmp(mode, "scratch_fbd") == 0 || strcmp(mode, "scratch_fbd_64") == 0
+        || strcmp(mode, "scratch_fbd_256") == 0) {
+        int fb_w = 16, fb_h = 16;
+        if (strstr(mode, "_256")) { fb_w = 256; fb_h = 256; }
+        else if (strstr(mode, "_64")) { fb_w = 64; fb_h = 64; }
+        uint64_t color_off = (fb_w * fb_h * 4 > 0x1000) ? OFF_SCRATCH_COLOR_LG : OFF_SCRATCH_COLOR;
+        build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+
+        struct kbase_atom_mtk frag_atom;
+        memset(&frag_atom, 0, sizeof(frag_atom));
+        frag_atom.jc = gva + OFF_SCRATCH_FRAG_JC;
+        frag_atom.atom_number = 1;
+        frag_atom.core_req = 0x001;
+
+        struct kbase_ioctl_job_submit sub = {0};
+        sub.addr = (uint64_t)&frag_atom;
+        sub.nr_atoms = 1;
+        sub.stride = sizeof(struct kbase_atom_mtk);
+        int ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub);
+        printf("JOB_SUBMIT (scratch_fbd) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+        drain_events(fd);
+
+        volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + color_off);
+        int changed = 0;
+        for (int i = 0; i < fb_w * fb_h; i++) {
+            if (color[i] != 0xdeadbeef) {
+                changed++;
+                if (changed <= 16) {
+                    int x = i % fb_w, y = i / fb_w;
+                    printf("color[%d] (%d,%d) = 0x%08x\n", i, x, y, color[i]);
+                }
+            }
+        }
+        printf("scratch_fbd: color changed=%d / %d (%dx%d)\n", changed, fb_w * fb_h, fb_w, fb_h);
+        if (changed == 0) {
+            printf("scratch_fbd: NO pixels written\n");
+        } else {
+            printf("scratch_fbd: first=0x%08x last=0x%08x\n", color[0], color[fb_w*fb_h-1]);
+        }
+        dump_words("POST scratch MFBD", (uint8_t *)cpu + OFF_SCRATCH_MFBD, 0x80);
+        dump_words("POST scratch RT0", (uint8_t *)cpu + OFF_SCRATCH_RT, 0x40);
+        dump_words("POST scratch frag JC", (uint8_t *)cpu + OFF_SCRATCH_FRAG_JC, 0x40);
+        free(baseline);
+        munmap(cpu, total_pages * PAGE_SIZE);
+        close(fd);
+        return 0;
+    }
 
     if (strcmp(mode, "hw2_zero_fc4000") == 0) {
         struct page_asset *rt = find_page(pages, sizeof(pages) / sizeof(pages[0]), 0x5efffc4000ULL);

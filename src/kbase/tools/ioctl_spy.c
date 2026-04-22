@@ -375,10 +375,40 @@ static void analyze_and_dump_job(const struct kbase_atom_mtk *atom, int atom_idx
         uint64_t actual_fbd = (fbd_ptr >> 6) << 6;
         if (actual_fbd) {
             spy_log("[SPY_DUMP]   -> Found Framebuffer Descriptor at 0x%llx", actual_fbd);
-            safe_dump_memory(actual_fbd, 256, "[SPY_DUMP_FBD]");
+            safe_dump_memory(actual_fbd, 512, "[SPY_DUMP_FBD]");
             char name[64];
             snprintf(name, sizeof(name), "atom%d_frag_fbd", atom_idx);
-            safe_write_capture(name, actual_fbd, 256);
+            safe_write_capture(name, actual_fbd, 512);
+
+            /* Log key MFBD fields */
+            if (probe_readable(actual_fbd, 0x40)) {
+                const uint32_t *fbd_w = (const uint32_t *)(uintptr_t)actual_fbd;
+                spy_log("[SPY_MFBD] PrePostModes=0x%08x SampleLoc=0x%llx DCD=0x%llx Tiler=0x%llx",
+                        fbd_w[0],
+                        (unsigned long long)read_addr64(fbd_w, 4),
+                        (unsigned long long)read_addr64(fbd_w, 6),
+                        (unsigned long long)read_addr64(fbd_w, 14));
+            }
+            /* Log MFBD parameters at FBD+0x20 */
+            if (probe_readable(actual_fbd + 0x20, 24)) {
+                const uint32_t *mp = (const uint32_t *)(uintptr_t)(actual_fbd + 0x20);
+                spy_log("[SPY_MFBD_PARAMS] W=%u H=%u CbufAlloc=%u TileSize=%u RTCount=%u",
+                        (mp[0] & 0xFFFF) + 1, (mp[0] >> 16) + 1,
+                        (mp[3] >> 24) * 1024, 1 << ((mp[3] >> 9) & 0xF),
+                        ((mp[3] >> 19) & 0xF) + 1);
+            }
+            /* Log and capture RT descriptor at FBD+0x80 */
+            if (probe_readable(actual_fbd + 0x80, 64)) {
+                const uint32_t *rt = (const uint32_t *)(uintptr_t)(actual_fbd + 0x80);
+                spy_log("[SPY_RT] IntFmt=0x%08x WrEn=%d BlkFmt=%d WbFmt=%d Swiz=0x%x",
+                        rt[0], rt[1] & 1, (rt[1] >> 8) & 0xF,
+                        (rt[1] >> 3) & 0x1F, (rt[1] >> 16) & 0xFFF);
+                spy_log("[SPY_RT] WbAddr=0x%llx RowStride=%u",
+                        (unsigned long long)read_addr64(rt, 8), rt[10]);
+                char rt_name[64];
+                snprintf(rt_name, sizeof(rt_name), "atom%d_frag_rt0", atom_idx);
+                safe_write_capture(rt_name, actual_fbd + 0x80, 64);
+            }
 
             // Also try to follow the DCD pointer in the FBD
             if (probe_readable(actual_fbd, 64)) {
@@ -562,12 +592,13 @@ int ioctl(int fd, int request, ...) {
     unsigned int nr = _IOC_NR(request);
     unsigned int sz = _IOC_SIZE(request);
 
-    // We only care about JOB_SUBMIT for the first 5 frames to avoid logcat spam
-    if (spy_enabled && magic == KBASE_IOCTL_TYPE && nr == KBASE_IOCTL_JOB_SUBMIT_NR && dump_count < 10) {
+    if (spy_enabled && magic == KBASE_IOCTL_TYPE && nr == KBASE_IOCTL_JOB_SUBMIT_NR && dump_count < 50) {
         struct kbase_ioctl_job_submit *submit = arg;
         if (submit && submit->stride == 72) {
             capture_seq++;
-            spy_log("Intercepted JOB_SUBMIT #%d with %d atoms", capture_seq, submit->nr_atoms);
+            spy_log("========================================");
+            spy_log("JOB_SUBMIT #%d: %d atoms, stride=%d", capture_seq, submit->nr_atoms, submit->stride);
+            spy_log("========================================");
             const struct kbase_atom_mtk *atoms = (const struct kbase_atom_mtk *)(uintptr_t)submit->addr;
             write_capture_file("atoms_raw", atoms, submit->nr_atoms * submit->stride);
             for (uint32_t i = 0; i < submit->nr_atoms; i++) {
@@ -575,8 +606,8 @@ int ioctl(int fd, int request, ...) {
                 analyze_and_dump_job(&atoms[i], i);
             }
             dump_count++;
-            if (dump_count >= 10) {
-                spy_log("Reached dump limit. Disabling spy to prevent log spam.");
+            if (dump_count >= 50) {
+                spy_log("Reached dump limit (50). Disabling spy.");
                 spy_enabled = 0;
             }
         }
