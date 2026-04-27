@@ -1,0 +1,23 @@
+{
+  "skill_name": "mali-re",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "Analyze the chrome GPU binary at /system/lib64/libchrome_producer_vulkan.so on the device. I want to understand how it submits jobs to the Mali GPU - specifically looking for the ioctl calls, job chain structures, and any GPU initialization code. Use ghidra-cli to import and analyze it, then dump the functions related to job submission.",
+      "expected_output": "A JSON or text dump of analyzed functions related to GPU job submission, including function names, addresses, and decompiled code for key functions",
+      "files": []
+    },
+    {
+      "id": 1,
+      "prompt": "Write a new test program at src/kbase/tests/test_frag_pixels.c that tests fragment shader pixel output by submitting a simple 2x2 pixel clear job to the GPU. Use the existing test programs in src/kbase/tests/ as a reference template. Make sure to include the proper init sequence (VERSION_CHECK then SET_FLAGS), then try to submit a fragment job with a 4x4 pixel framebuffer. Include dmesg output on failure.",
+      "expected_output": "A complete, compilable C test program at src/kbase/tests/test_frag_pixels.c that attempts GPU pixel output",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I've been seeing EINVAL errors when trying to call JOB_SUBMIT after proper initialization. Check the findings directory for any existing analysis, and strace the gpud daemon on the device to see what init sequence it uses. Document the likely cause and write a patch or workaround to src/kbase/debug/debug_job_submit_fix.c.",
+      "expected_output": "A documented analysis of why JOB_SUBMIT fails and a working test program or patch at src/kbase/debug/debug_job_submit_fix.c",
+      "files": []
+    }
+  ]
+}

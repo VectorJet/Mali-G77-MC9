@@ -40,6 +40,12 @@
 #define OFF_SCRATCH_FRAG_JC   0xB000
 #define OFF_SCRATCH_SAMPLELOC 0xB100
 
+/* Shader MFBD mode offsets */
+#define OFF_SHADER_ISA        0xC000
+#define OFF_SHADER_DCD        0xC100
+#define OFF_SHADER_BLEND      0xC200
+#define OFF_SHADER_TLS        0xC300
+
 struct base_dependency {
     uint8_t atom_id;
     uint8_t dep_type;
@@ -289,6 +295,159 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
     dump_words("scratch frag JC", base + OFF_SCRATCH_FRAG_JC, 0x40);
 }
 
+/* === Minimal Valhall fragment shader writing solid green to RT0 === *
+ *
+ * Builds on the working scratch_fbd path. Adds a real fragment shader
+ * via the Frame Shader DCD pointer at MFBD+0x18 with Pre Frame 0 = Always.
+ *
+ * Shader (7 instructions, 56 bytes):
+ *   IADD_IMM.i32 r0, 0x0, #0x0           ; r0 = 0.0f bits
+ *   FADD.f32     r1, r0, 0x3F800000      ; r1 = 1.0f
+ *   IADD_IMM.i32 r2, 0x0, #0x0           ; r2 = 0.0f
+ *   FADD.f32     r3, r0, 0x3F800000      ; r3 = 1.0f
+ *   NOP.wait0126
+ *   ATEST.discard @r60, r60, 0x3F800000, atest_datum.w0
+ *   BLEND.slot0.v4.f32.end @r0:r1:r2:r3, blend_descriptor_0.w0, r60, target:0x0
+ *
+ * Output: RGBA = (0,1,0,1) = solid green.
+ *
+ * Encodings extracted from
+ * refs/panfrost/src/panfrost/compiler/bifrost/valhall/test/assembler-cases.txt.
+ */
+static const uint8_t k_valhall_green_fs[] = {
+    /* IADD_IMM.i32 r0, 0x0, #0x0 */
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x10, 0x01,
+    /* FADD.f32 r1, r0, 0x3F800000 -- using r1 reg dst */
+    0x00, 0xd0, 0x00, 0x00, 0x00, 0xc1, 0xa4, 0x00,
+    /* IADD_IMM.i32 r2, 0x0, #0x0 */
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x10, 0x01,
+    /* FADD.f32 r3, r0, 0x3F800000 */
+    0x00, 0xd0, 0x00, 0x00, 0x00, 0xc3, 0xa4, 0x00,
+    /* NOP.wait0126 */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40,
+    /* ATEST.discard @r60, r60, 0x3F800000, atest_datum.w0 */
+    0x3c, 0xd0, 0xea, 0x00, 0x02, 0xbc, 0x7d, 0x68,
+    /* BLEND.slot0.v4.f32.end @r0:r1:r2:r3, blend_descriptor_0.w0, r60, target:0x0 */
+    0xf0, 0x00, 0x3c, 0x32, 0x08, 0x40, 0x7f, 0x78,
+};
+
+static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64_t color_off) {
+    uint8_t *base = (uint8_t *)cpu;
+
+    /* Start from the proven scratch_fbd base */
+    build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+
+    /* Inject the Valhall fragment shader ISA */
+    memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+    /* Pad ISA region with zeros (NOPs interpreted as instr_invalid; fine since we end at BLEND) */
+
+    /* Build a minimal Blend descriptor (16 bytes) for fixed-function REPLACE on RGBA8 UNORM
+     *
+     * v9 Blend struct (16 bytes, 4 words):
+     *   word 0:
+     *     bit 0   Load Destination = 0
+     *     bit 8   Alpha To One = 0
+     *     bit 9   Enable = 1
+     *     bit 10  sRGB = 0
+     *     bit 11  Round to FB precision = 0
+     *     bits 16-31 Blend Constant = 0
+     *   word 1: Equation
+     *     bits 0-11  RGB Function: A=Src(2), B=Src(2), C=Zero(1), Negate=0, Invert=0
+     *                  -> packed = (2<<0) | (2<<4) | (1<<8) = 0x122
+     *     bits 12-23 Alpha Function: same -> 0x122
+     *     bits 28-31 Color Mask = 0xF (RGBA)
+     *                  -> word1 = 0x122 | (0x122 << 12) | (0xF << 28) = 0xF0122122
+     *   words 2-3: Internal Blend (Fixed-Function mode)
+     *     bits 0-1   Mode = Fixed-Function (2)
+     *     bits 3-4   Num Comps - 1 = 3 (4 components)
+     *     bits 16-19 RT = 0
+     *     word 1: Conversion (Internal Conversion struct, 22-bit Pixel Format)
+     *       Memory Format = (RGBA8_TB << 12) | RGBA = (237 << 12) | 0 = 0xED000
+     *
+     *  We use Fixed-Function (mode=2) instead of Opaque (mode=1) to be safe.
+     */
+    uint32_t *bl = (uint32_t *)(base + OFF_SHADER_BLEND);
+    bl[0] = (1u << 9);                                  /* Enable=1 */
+    bl[1] = (2u << 0) | (2u << 4) | (1u << 8) |         /* RGB:   A=Src B=Src C=Zero */
+            ((2u << 0) | (2u << 4) | (1u << 8)) << 12 | /* Alpha: same */
+            (0xFu << 28);                               /* Color Mask = RGBA */
+    /* Internal Blend (8 bytes): Mode=Fixed-Function, num_comps=4, conversion=RGBA8 */
+    bl[2] = (2u << 0) | (3u << 3) | (0u << 16);         /* Mode=2, num_comps-1=3, RT=0 */
+    bl[3] = (237u << 12) | 0u;                          /* Conversion: RGBA8_TB | RGBA */
+
+    /* Build the v9 Draw / Renderer State (DCD) -- 128 bytes total
+     *   word 0  = Flags 0
+     *   word 1  = Flags 1
+     *   words 2-4 = Vertex Array (96 bits)
+     *   word 6  = Min Z (float)
+     *   word 7  = Max Z (float)
+     *   word 10 = Depth/stencil pointer (low)
+     *   word 12 = Blend count (bits 0-3) | Blend pointer (bits 4-63), shr(4)
+     *   word 14 = Occlusion ptr (low)
+     *   word 16 = Shader Environment start
+     *     SE word 0 (=DCD word 16) = attribute_offset (32)
+     *     SE word 1 (=DCD word 17) = FAU count (low 8 bits)
+     *     SE word 8 (=DCD word 24) = Resources ptr  -> DCD+0x60
+     *     SE word 10 (=DCD word 26) = Shader ptr    -> DCD+0x68
+     *     SE word 12 (=DCD word 28) = TLS ptr       -> DCD+0x70
+     *     SE word 14 (=DCD word 30) = FAU ptr       -> DCD+0x78
+     */
+    uint32_t *dcd = (uint32_t *)(base + OFF_SHADER_DCD);
+    memset(dcd, 0, 128);
+    /* Flags 0: Multisample enable=0, no culling, depth/stencil ops default off
+     *   Allow forward pixel to kill = 1 (bit 0)
+     *   Allow forward pixel to be killed = 1 (bit 1)
+     *   Allow primitive reorder = 1 (bit 6)
+     */
+    dcd[0] = (1u << 0) | (1u << 1) | (1u << 6);
+    /* Flags 1: sample_mask = 0xFFFF, render_target_mask = 0x1 (RT0 only) */
+    dcd[1] = 0xFFFF | (0x1u << 16);
+    /* Min Z = 0.0, Max Z = 1.0 */
+    dcd[6] = 0x00000000;
+    dcd[7] = 0x3F800000;
+    /* Blend count = 1, Blend pointer (shr(4)) */
+    uint64_t blend_ptr = gva + OFF_SHADER_BLEND;
+    *(uint64_t *)(dcd + 12) = 1ULL | blend_ptr;  /* low nibble 1, ptr 16-byte aligned */
+    /* Shader Environment at DCD+0x40 (word 16) */
+    /* attribute_offset = 0, fau_count = 0 */
+    /* Shader pointer at DCD+0x68 */
+    *(uint64_t *)(dcd + 26) = gva + OFF_SHADER_ISA;
+    /* TLS pointer at DCD+0x70 -- minimal Local Storage descriptor (32 bytes zero) */
+    *(uint64_t *)(dcd + 28) = gva + OFF_SHADER_TLS;
+    /* Resources, FAU = 0 (no resources, no user FAU) */
+
+    /* Write minimal TLS / Local Storage descriptor (zeros = no TLS/WLS) */
+    memset(base + OFF_SHADER_TLS, 0, 32);
+
+    /* Now patch the MFBD to enable the frame shader */
+    /* MFBD word 0: Pre Frame 0 = Always (1) */
+    uint32_t *mfbd = (uint32_t *)(base + OFF_SCRATCH_MFBD);
+    mfbd[0] = 1;  /* Pre Frame 0 = Always */
+    /* Frame Shader DCDs pointer at MFBD+0x18 (word 6) -- points to array of DCD pointers? Or DCD itself?
+     * In v9, this field is "Frame Shader DCDs" = address. Single DCD here. */
+    *(uint64_t *)(base + OFF_SCRATCH_MFBD + 0x18) = gva + OFF_SHADER_DCD;
+
+    /* Disable the RT-write-enable clear path so we see the shader's output, not the clear.
+     * Actually keep RT Write Enable=1 so the tile gets written back; just change clear color
+     * to a sentinel so we can distinguish shader output from clear. */
+    uint32_t clear_sentinel = 0xFF0000FF;  /* solid red sentinel */
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x30) = clear_sentinel;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x34) = clear_sentinel;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x38) = clear_sentinel;
+    *(uint32_t *)(base + OFF_SCRATCH_RT + 0x3C) = clear_sentinel;
+
+    printf("shader_fbd: shader ISA at gpu 0x%llx (%zu bytes)\n",
+           (unsigned long long)(gva + OFF_SHADER_ISA), sizeof(k_valhall_green_fs));
+    printf("shader_fbd: DCD at gpu 0x%llx, blend at 0x%llx, TLS at 0x%llx\n",
+           (unsigned long long)(gva + OFF_SHADER_DCD),
+           (unsigned long long)(gva + OFF_SHADER_BLEND),
+           (unsigned long long)(gva + OFF_SHADER_TLS));
+    dump_words("shader ISA", base + OFF_SHADER_ISA, sizeof(k_valhall_green_fs));
+    dump_words("shader DCD", base + OFF_SHADER_DCD, 128);
+    dump_words("shader Blend", base + OFF_SHADER_BLEND, 16);
+    dump_words("shader MFBD (post-patch)", base + OFF_SCRATCH_MFBD, 0x80);
+}
+
 static void drain_events(int fd) {
     for (int i = 0; i < 8; i++) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -360,13 +519,19 @@ int main(int argc, char **argv) {
     atoms[2].jc = gva + OFF_FRAG;
     atoms[3].jc = gva + OFF_SOFT3;
 
+    int is_shader_mode = (strncmp(mode, "shader_fbd", 10) == 0);
     if (strcmp(mode, "scratch_fbd") == 0 || strcmp(mode, "scratch_fbd_64") == 0
-        || strcmp(mode, "scratch_fbd_256") == 0) {
+        || strcmp(mode, "scratch_fbd_256") == 0
+        || is_shader_mode) {
         int fb_w = 16, fb_h = 16;
         if (strstr(mode, "_256")) { fb_w = 256; fb_h = 256; }
         else if (strstr(mode, "_64")) { fb_w = 64; fb_h = 64; }
         uint64_t color_off = (fb_w * fb_h * 4 > 0x1000) ? OFF_SCRATCH_COLOR_LG : OFF_SCRATCH_COLOR;
-        build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+        if (is_shader_mode) {
+            build_shader_fbd(cpu, gva, fb_w, fb_h, color_off);
+        } else {
+            build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+        }
 
         struct kbase_atom_mtk frag_atom;
         memset(&frag_atom, 0, sizeof(frag_atom));

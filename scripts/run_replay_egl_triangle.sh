@@ -6,7 +6,7 @@ DEVICE_PORT="${DEVICE_PORT:-8022}"
 DEVICE_USER="${DEVICE_USER:-u0_a659}"
 MODE="${1:-exact4}"
 
-SRC_LOCAL="src/kbase/replay_egl_triangle.c"
+SRC_LOCAL="src/kbase/replay/replay_egl_triangle.c"
 ASSET_DIR_LOCAL="captured_shaders/egl_dumper_root_preload_2026-04-17"
 TERMUX_STAGE_DIR="/data/data/com.termux/files/home"
 TERMUX_CLANG="/data/data/com.termux/files/usr/bin/clang"
