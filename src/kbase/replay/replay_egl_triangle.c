@@ -41,10 +41,12 @@
 #define OFF_SCRATCH_SAMPLELOC 0xB100
 
 /* Shader MFBD mode offsets */
-#define OFF_SHADER_ISA        0xC000
-#define OFF_SHADER_DCD        0xC100
-#define OFF_SHADER_BLEND      0xC200
-#define OFF_SHADER_TLS        0xC300
+#define OFF_SHADER_ISA        0xC000  /* raw Valhall ISA */
+#define OFF_SHADER_DCD        0xC100  /* 3 × 128 = 384 bytes; pre0/pre1/post */
+#define OFF_SHADER_PROGRAM    0xCC00  /* 32-byte SHADER_PROGRAM descriptor */
+#define OFF_SHADER_BLEND      0xD000
+#define OFF_SHADER_TLS        0xD100
+#define OFF_SHADER_RESOURCES  0xD200  /* dummy resources table */
 
 struct base_dependency {
     uint8_t atom_id;
@@ -331,14 +333,66 @@ static const uint8_t k_valhall_green_fs[] = {
     0xf0, 0x00, 0x3c, 0x32, 0x08, 0x40, 0x7f, 0x78,
 };
 
+/* Tunables for shader_fbd diagnostic variants. Set via env or recompile. */
+static int g_shader_pre_frame_mode = 1;  /* 0=Never, 1=Always, 2=Intersect, 3=Early ZS always */
+static int g_shader_skip_atest    = 0;
+static int g_shader_use_minimal   = 0;
+
 static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64_t color_off) {
     uint8_t *base = (uint8_t *)cpu;
+
+    /* Allow env override of variant */
+    const char *e;
+    if ((e = getenv("SHADER_PFM"))      ) g_shader_pre_frame_mode = atoi(e);
+    if ((e = getenv("SHADER_SKIP_ATEST"))) g_shader_skip_atest    = atoi(e);
+    if ((e = getenv("SHADER_MINIMAL"))   ) g_shader_use_minimal   = atoi(e);
+    printf("shader_fbd variants: pre_frame_mode=%d skip_atest=%d minimal=%d\n",
+           g_shader_pre_frame_mode, g_shader_skip_atest, g_shader_use_minimal);
 
     /* Start from the proven scratch_fbd base */
     build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
 
-    /* Inject the Valhall fragment shader ISA */
-    memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+    /* Inject the Valhall fragment shader ISA at OFF_SHADER_ISA */
+    if (g_shader_use_minimal) {
+        /* Just BLEND.slot0.v4.f32.end (8 bytes) */
+        memcpy(base + OFF_SHADER_ISA,
+               k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
+    } else if (g_shader_skip_atest) {
+        memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, 32);          /* r0..r3 setup */
+        memcpy(base + OFF_SHADER_ISA + 32,
+               k_valhall_green_fs + 48, 8);                              /* BLEND */
+    } else {
+        memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+    }
+
+    /* Build the v9 SHADER_PROGRAM descriptor (32 bytes / 8 words):
+     *   word 0:
+     *     [3:0]   Type = Shader (8)
+     *     [7:4]   Stage = Fragment (2)
+     *     [8]     Fragment coverage bitmask = GL (1)
+     *     [16]    Suppress NaN = 0
+     *     [28]    Requires helper threads = 1 (fragment)
+     *     [31:30] Register allocation = 32 Per Thread (2)
+     *   word 1 [15:0] = Preload mask = 0
+     *   words 2-3 = Binary address (raw ISA VA)
+     */
+    {
+        uint32_t *sp = (uint32_t *)(base + OFF_SHADER_PROGRAM);
+        memset(sp, 0, 32);
+        sp[0] = (8u << 0)        /* Type = Shader */
+              | (2u << 4)        /* Stage = Fragment */
+              | (1u << 8)        /* Coverage bitmask type = GL */
+              | (1u << 28)       /* Requires helper threads = true */
+              | (2u << 30);      /* Register allocation = 32 Per Thread */
+        sp[1] = 0;               /* Preload = 0 */
+        uint64_t isa_addr = gva + OFF_SHADER_ISA;
+        sp[2] = (uint32_t)(isa_addr & 0xFFFFFFFFu);
+        sp[3] = (uint32_t)(isa_addr >> 32);
+    }
+
+    /* Build a minimum dummy resources table (32 bytes zeroed). The shader does
+     * not use textures/samplers but the GPU may probe the table base. */
+    memset(base + OFF_SHADER_RESOURCES, 0, 64);
     /* Pad ISA region with zeros (NOPs interpreted as instr_invalid; fine since we end at BLEND) */
 
     /* Build a minimal Blend descriptor (16 bytes) for fixed-function REPLACE on RGBA8 UNORM
@@ -393,7 +447,14 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
      *     SE word 14 (=DCD word 30) = FAU ptr       -> DCD+0x78
      */
     uint32_t *dcd = (uint32_t *)(base + OFF_SHADER_DCD);
-    memset(dcd, 0, 128);
+    /* Zero out the full 3-DCD array (384 bytes). The pointer at MFBD+0x18 is an
+     * ARRAY of 3 Draw descriptors:
+     *   index 0 -> Pre Frame 0
+     *   index 1 -> Pre Frame 1
+     *   index 2 -> Post Frame
+     * Only Pre Frame 0 = Always in our setup, so only DCD[0] needs population.
+     * DCD[1] and DCD[2] stay zeroed (their corresponding modes are Never). */
+    memset(dcd, 0, 3 * 128);
     /* Flags 0: Multisample enable=0, no culling, depth/stencil ops default off
      *   Allow forward pixel to kill = 1 (bit 0)
      *   Allow forward pixel to be killed = 1 (bit 1)
@@ -410,19 +471,54 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     *(uint64_t *)(dcd + 12) = 1ULL | blend_ptr;  /* low nibble 1, ptr 16-byte aligned */
     /* Shader Environment at DCD+0x40 (word 16) */
     /* attribute_offset = 0, fau_count = 0 */
-    /* Shader pointer at DCD+0x68 */
-    *(uint64_t *)(dcd + 26) = gva + OFF_SHADER_ISA;
-    /* TLS pointer at DCD+0x70 -- minimal Local Storage descriptor (32 bytes zero) */
+    /* Resources pointer at DCD+0x60 -- pointer | resource_table_count.
+     * Resource tables are aligned, low bits encode the count.
+     * For our 1-table allocation: ptr | 1.
+     * For Mali on v9, resources are 64-byte aligned so low 6 bits hold count. */
+    *(uint64_t *)(dcd + 24) = (gva + OFF_SHADER_RESOURCES) | 1ULL;
+    /* Shader pointer at DCD+0x68 -- this is the SHADER_PROGRAM descriptor VA,
+     * NOT the raw ISA. SHADER_PROGRAM struct (32 bytes) wraps the binary
+     * with stage, register-allocation, and preload metadata. */
+    *(uint64_t *)(dcd + 26) = gva + OFF_SHADER_PROGRAM;
+    /* TLS pointer at DCD+0x70 -- minimal Local Storage descriptor */
     *(uint64_t *)(dcd + 28) = gva + OFF_SHADER_TLS;
-    /* Resources, FAU = 0 (no resources, no user FAU) */
+    /* FAU pointer at DCD+0x78 -- 0 since fau_count = 0 */
+    *(uint64_t *)(dcd + 30) = 0;
 
-    /* Write minimal TLS / Local Storage descriptor (zeros = no TLS/WLS) */
-    memset(base + OFF_SHADER_TLS, 0, 32);
+    /* Write minimal v9 "Local Storage" descriptor (32 bytes / 8 words):
+     *
+     *   word 0 [4:0]   = TLS Size = 0
+     *   word 1 [4:0]   = WLS Instances log2 (NO_WORKGROUP_MEM = 0x80000000)
+     *   word 2-3 [47:0]= TLS Base Pointer (48 bits, low)
+     *   word 3 [31:28] = TLS Address Mode (0 = Flat)
+     *   word 4-5       = WLS Base Pointer = 0
+     *
+     * For a fragment shader with no register spill / no shared memory:
+     *   TLS size = 0, WLS = NO_WORKGROUP_MEM (0x80000000)
+     *
+     * Even with TLS Size = 0, we point TLS Base at a valid scratch
+     * allocation so the GPU never dereferences VA 0x0 if it touches
+     * the TLS base register during fragment thread launch.
+     */
+    {
+        uint32_t *ls = (uint32_t *)(base + OFF_SHADER_TLS);
+        memset(ls, 0, 32);
+        ls[0] = 0;                        /* TLS Size = 0 */
+        ls[1] = 0x80000000u;              /* WLS Instances = NO_WORKGROUP_MEM */
+        /* TLS Base Pointer at words 2-3 (48-bit) -- give it a valid backing VA.
+         * Use OFF_SCRATCH_HEAP which is a 4 KiB scratch region in our same
+         * SAME_VA mapping, already zero. */
+        uint64_t tls_base = gva + OFF_SCRATCH_HEAP;
+        ls[2] = (uint32_t)(tls_base & 0xFFFFFFFFu);
+        ls[3] = (uint32_t)((tls_base >> 32) & 0xFFFFu);
+        /* TLS Address Mode = Flat (0) -- already zero */
+        /* WLS Base Pointer = 0 (no workgroup mem) */
+    }
 
     /* Now patch the MFBD to enable the frame shader */
-    /* MFBD word 0: Pre Frame 0 = Always (1) */
+    /* MFBD word 0: Pre Frame 0 = configurable (default Always = 1) */
     uint32_t *mfbd = (uint32_t *)(base + OFF_SCRATCH_MFBD);
-    mfbd[0] = 1;  /* Pre Frame 0 = Always */
+    mfbd[0] = (uint32_t)(g_shader_pre_frame_mode & 0x7);
     /* Frame Shader DCDs pointer at MFBD+0x18 (word 6) -- points to array of DCD pointers? Or DCD itself?
      * In v9, this field is "Frame Shader DCDs" = address. Single DCD here. */
     *(uint64_t *)(base + OFF_SCRATCH_MFBD + 0x18) = gva + OFF_SHADER_DCD;

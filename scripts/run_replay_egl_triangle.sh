@@ -35,5 +35,11 @@ ssh -p "$DEVICE_PORT" "${DEVICE_USER}@${DEVICE_HOST}" \
     "su -c '${TERMUX_CLANG} -O0 -g -o ${BIN_REMOTE} ${SRC_REMOTE} && chmod 755 ${BIN_REMOTE}'"
 
 echo "[4/4] Run replay binary as root"
+ENV_PASS=""
+for v in SHADER_PFM SHADER_SKIP_ATEST SHADER_MINIMAL; do
+    if [[ -n "${!v:-}" ]]; then
+        ENV_PASS="${ENV_PASS} ${v}=${!v}"
+    fi
+done
 ssh -p "$DEVICE_PORT" "${DEVICE_USER}@${DEVICE_HOST}" \
-    "su -c '${BIN_REMOTE} ${ASSET_DIR_REMOTE} ${MODE}'"
+    "su -c '${ENV_PASS} ${BIN_REMOTE} ${ASSET_DIR_REMOTE} ${MODE}'"
