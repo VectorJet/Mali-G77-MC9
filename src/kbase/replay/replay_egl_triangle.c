@@ -47,6 +47,7 @@
 #define OFF_SHADER_BLEND      0xD000
 #define OFF_SHADER_TLS        0xD100
 #define OFF_SHADER_RESOURCES  0xD200  /* dummy resources table */
+#define OFF_SHADER_DEPTH      0xD300  /* DEPTH_STENCIL descriptor (32 bytes) */
 
 struct base_dependency {
     uint8_t atom_id;
@@ -338,6 +339,10 @@ static int g_shader_pre_frame_mode = 1;  /* 0=Never, 1=Always, 2=Intersect, 3=Ea
 static int g_shader_skip_atest    = 0;
 static int g_shader_use_minimal   = 0;
 
+/* Separate executable shader allocation (must be GPU_EX). Set up in main(). */
+static uint64_t g_shader_exec_va = 0;
+static void *g_shader_exec_cpu = NULL;
+
 static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64_t color_off) {
     uint8_t *base = (uint8_t *)cpu;
 
@@ -352,18 +357,38 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     /* Start from the proven scratch_fbd base */
     build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
 
-    /* Inject the Valhall fragment shader ISA at OFF_SHADER_ISA */
-    if (g_shader_use_minimal) {
-        /* Just BLEND.slot0.v4.f32.end (8 bytes) */
-        memcpy(base + OFF_SHADER_ISA,
-               k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
-    } else if (g_shader_skip_atest) {
-        memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, 32);          /* r0..r3 setup */
-        memcpy(base + OFF_SHADER_ISA + 32,
-               k_valhall_green_fs + 48, 8);                              /* BLEND */
+    /* Inject the Valhall fragment shader ISA. The shader MUST live in a
+     * GPU_EX (executable) memory region — our main allocation is RW-only. */
+    uint64_t isa_addr;
+    if (g_shader_exec_cpu && g_shader_exec_va) {
+        uint8_t *exec = (uint8_t *)g_shader_exec_cpu;
+        if (g_shader_use_minimal) {
+            memcpy(exec, k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
+        } else if (g_shader_skip_atest) {
+            memcpy(exec, k_valhall_green_fs, 32);
+            memcpy(exec + 32, k_valhall_green_fs + 48, 8);
+        } else {
+            memcpy(exec, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+        }
+        isa_addr = g_shader_exec_va;
     } else {
-        memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+        /* Fallback path: copy ISA into the main allocation (will fail with
+         * permission fault when the GPU tries to execute it). */
+        if (g_shader_use_minimal) {
+            memcpy(base + OFF_SHADER_ISA,
+                   k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
+        } else if (g_shader_skip_atest) {
+            memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, 32);
+            memcpy(base + OFF_SHADER_ISA + 32,
+                   k_valhall_green_fs + 48, 8);
+        } else {
+            memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+        }
+        isa_addr = gva + OFF_SHADER_ISA;
     }
+    printf("shader_fbd: ISA at gpu 0x%llx (%s)\n",
+           (unsigned long long)isa_addr,
+           g_shader_exec_cpu ? "GPU_EX exec page" : "fallback non-exec");
 
     /* Build the v9 SHADER_PROGRAM descriptor (32 bytes / 8 words):
      *   word 0:
@@ -385,7 +410,6 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
               | (1u << 28)       /* Requires helper threads = true */
               | (2u << 30);      /* Register allocation = 32 Per Thread */
         sp[1] = 0;               /* Preload = 0 */
-        uint64_t isa_addr = gva + OFF_SHADER_ISA;
         sp[2] = (uint32_t)(isa_addr & 0xFFFFFFFFu);
         sp[3] = (uint32_t)(isa_addr >> 32);
     }
@@ -466,6 +490,8 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     /* Min Z = 0.0, Max Z = 1.0 */
     dcd[6] = 0x00000000;
     dcd[7] = 0x3F800000;
+    /* Depth/stencil pointer at DCD word 10-11 (DCD+0x28) */
+    *(uint64_t *)(dcd + 10) = gva + OFF_SHADER_DEPTH;
     /* Blend count = 1, Blend pointer (shr(4)) */
     uint64_t blend_ptr = gva + OFF_SHADER_BLEND;
     *(uint64_t *)(dcd + 12) = 1ULL | blend_ptr;  /* low nibble 1, ptr 16-byte aligned */
@@ -484,6 +510,35 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     *(uint64_t *)(dcd + 28) = gva + OFF_SHADER_TLS;
     /* FAU pointer at DCD+0x78 -- 0 since fau_count = 0 */
     *(uint64_t *)(dcd + 30) = 0;
+
+    /* Build minimal v9 Depth/stencil descriptor (32 bytes / 8 words):
+     *   word 0:
+     *     [3:0]   Type = Depth/stencil (7)
+     *     [6:4]   Front compare function = Always (7)
+     *     [9:7]   Front stencil fail = Keep (0)
+     *     [12:10] Front depth fail    = Keep (0)
+     *     [15:13] Front depth pass    = Keep (0)
+     *     [18:16] Back compare function = Always (7)
+     *     [29:24] Back ops = Keep
+     *     [30] Stencil from shader = 0
+     *     [31] Stencil test enable = 0
+     *   word 4:
+     *     [22] Depth cull enable = 1
+     *     [24:23] Depth clamp mode = [0,1] (0)
+     *     [26:25] Depth source = Fixed function (0)
+     *     [27] Depth write enable = 0
+     *     [28] Depth bias enable = 0
+     *     [31:29] Depth function = Always (7)
+     */
+    {
+        uint32_t *zs = (uint32_t *)(base + OFF_SHADER_DEPTH);
+        memset(zs, 0, 32);
+        zs[0] = (7u << 0)    /* Type = Depth/stencil */
+              | (7u << 4)    /* Front compare = Always */
+              | (7u << 16);  /* Back compare = Always */
+        zs[4] = (1u << 22)   /* Depth cull enable = true */
+              | (7u << 29);  /* Depth function = Always */
+    }
 
     /* Write minimal v9 "Local Storage" descriptor (32 bytes / 8 words):
      *
@@ -589,6 +644,31 @@ int main(int argc, char **argv) {
     uint64_t gva = (uint64_t)cpu;
     memset(cpu, 0, total_pages * PAGE_SIZE);
     printf("mapped SAME_VA cpu/gpu = 0x%llx\n", (unsigned long long)gva);
+
+    /* Allocate a separate executable page for shader binaries (GPU_EX flag).
+     * Flags: CPU_RD | CPU_WR | GPU_RD | GPU_EX | SAME_VA = 0x2015
+     * Note: shader memory should NOT be GPU_WR (GPU_EX + GPU_WR is rejected
+     * on most kernels for security). */
+    {
+        uint64_t mem_ex[4] = { 1 /*va_pages*/, 1 /*commit*/, 0,
+                               0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x2000 };
+        if (ioctl(fd, KBASE_IOCTL_MEM_ALLOC, mem_ex) >= 0) {
+            void *exec = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, fd, mem_ex[1]);
+            if (exec != MAP_FAILED) {
+                memset(exec, 0, PAGE_SIZE);
+                g_shader_exec_cpu = exec;
+                g_shader_exec_va = (uint64_t)exec;
+                printf("allocated GPU_EX shader page cpu/gpu = 0x%llx\n",
+                       (unsigned long long)g_shader_exec_va);
+            } else {
+                perror("mmap shader_exec");
+            }
+        } else {
+            printf("MEM_ALLOC GPU_EX failed errno=%d (%s) -- shader will use non-exec fallback\n",
+                   errno, strerror(errno));
+        }
+    }
 
     struct page_asset pages[sizeof(k_page_assets) / sizeof(k_page_assets[0])];
     memcpy(pages, k_page_assets, sizeof(k_page_assets));
