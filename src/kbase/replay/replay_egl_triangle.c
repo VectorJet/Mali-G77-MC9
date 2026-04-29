@@ -318,14 +318,34 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
  * refs/panfrost/src/panfrost/compiler/bifrost/valhall/test/assembler-cases.txt.
  */
 static const uint8_t k_valhall_green_fs[] = {
-    /* IADD_IMM.i32 r0, 0x0, #0x0 */
+    /* IADD_IMM.i32 r0, 0x0, #0x0 -- r0 = 0.0f */
     0xc0, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x10, 0x01,
-    /* FADD.f32 r1, r0, 0x3F800000 -- using r1 reg dst */
+    /* FADD.f32 r1, r0, 0x3F800000 -- r1 = 1.0f */
     0x00, 0xd0, 0x00, 0x00, 0x00, 0xc1, 0xa4, 0x00,
+    /* IADD_IMM.i32 r2, 0x0, #0x0 -- r2 = 0.0f */
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x10, 0x01,
+    /* FADD.f32 r3, r0, 0x3F800000 -- r3 = 1.0f */
+    0x00, 0xd0, 0x00, 0x00, 0x00, 0xc3, 0xa4, 0x00,
+    /* NOP.wait0126 */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40,
+    /* ATEST.discard @r60, r60, 0x3F800000, atest_datum.w0 */
+    0x3c, 0xd0, 0xea, 0x00, 0x02, 0xbc, 0x7d, 0x68,
+    /* BLEND.slot0.v4.f32.end @r0:r1:r2:r3, blend_descriptor_0.w0, r60, target:0x0 */
+    0xf0, 0x00, 0x3c, 0x32, 0x08, 0x40, 0x7f, 0x78,
+};
+
+/* Same as k_valhall_green_fs but outputs RED (R=1,G=0,B=0,A=1).
+ * Achieved by swapping the r0/r1 setup: r0 gets FADD-loaded 1.0,
+ * r1 gets IADD_IMM 0, while r2 stays 0 and r3 stays 1. */
+static const uint8_t k_valhall_red_fs[] = {
+    /* IADD_IMM.i32 r1, 0x0, #0x0  (encoding patches dst=r1 in word 5) */
+    0xc0, 0x00, 0x00, 0x00, 0x00, 0xc1, 0x10, 0x01,
+    /* FADD.f32 r0, r1, 0x3F800000 */
+    0x01, 0xd0, 0x00, 0x00, 0x00, 0xc0, 0xa4, 0x00,
     /* IADD_IMM.i32 r2, 0x0, #0x0 */
     0xc0, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x10, 0x01,
-    /* FADD.f32 r3, r0, 0x3F800000 */
-    0x00, 0xd0, 0x00, 0x00, 0x00, 0xc3, 0xa4, 0x00,
+    /* FADD.f32 r3, r1, 0x3F800000 */
+    0x01, 0xd0, 0x00, 0x00, 0x00, 0xc3, 0xa4, 0x00,
     /* NOP.wait0126 */
     0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40,
     /* ATEST.discard @r60, r60, 0x3F800000, atest_datum.w0 */
@@ -338,6 +358,7 @@ static const uint8_t k_valhall_green_fs[] = {
 static int g_shader_pre_frame_mode = 1;  /* 0=Never, 1=Always, 2=Intersect, 3=Early ZS always */
 static int g_shader_skip_atest    = 0;
 static int g_shader_use_minimal   = 0;
+static int g_shader_use_red       = 0;
 
 /* Separate executable shader allocation (must be GPU_EX). Set up in main(). */
 static uint64_t g_shader_exec_va = 0;
@@ -351,44 +372,45 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     if ((e = getenv("SHADER_PFM"))      ) g_shader_pre_frame_mode = atoi(e);
     if ((e = getenv("SHADER_SKIP_ATEST"))) g_shader_skip_atest    = atoi(e);
     if ((e = getenv("SHADER_MINIMAL"))   ) g_shader_use_minimal   = atoi(e);
-    printf("shader_fbd variants: pre_frame_mode=%d skip_atest=%d minimal=%d\n",
-           g_shader_pre_frame_mode, g_shader_skip_atest, g_shader_use_minimal);
+    if ((e = getenv("SHADER_RED"))       ) g_shader_use_red       = atoi(e);
+    printf("shader_fbd variants: pre_frame_mode=%d skip_atest=%d minimal=%d red=%d\n",
+           g_shader_pre_frame_mode, g_shader_skip_atest, g_shader_use_minimal,
+           g_shader_use_red);
 
     /* Start from the proven scratch_fbd base */
     build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
 
     /* Inject the Valhall fragment shader ISA. The shader MUST live in a
      * GPU_EX (executable) memory region — our main allocation is RW-only. */
+    const uint8_t *shader_src = g_shader_use_red ? k_valhall_red_fs : k_valhall_green_fs;
+    size_t shader_len = sizeof(k_valhall_green_fs);  /* both arrays have identical length */
     uint64_t isa_addr;
     if (g_shader_exec_cpu && g_shader_exec_va) {
         uint8_t *exec = (uint8_t *)g_shader_exec_cpu;
         if (g_shader_use_minimal) {
-            memcpy(exec, k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
+            memcpy(exec, shader_src + shader_len - 8, 8);
         } else if (g_shader_skip_atest) {
-            memcpy(exec, k_valhall_green_fs, 32);
-            memcpy(exec + 32, k_valhall_green_fs + 48, 8);
+            memcpy(exec, shader_src, 32);
+            memcpy(exec + 32, shader_src + 48, 8);
         } else {
-            memcpy(exec, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+            memcpy(exec, shader_src, shader_len);
         }
         isa_addr = g_shader_exec_va;
     } else {
-        /* Fallback path: copy ISA into the main allocation (will fail with
-         * permission fault when the GPU tries to execute it). */
         if (g_shader_use_minimal) {
-            memcpy(base + OFF_SHADER_ISA,
-                   k_valhall_green_fs + sizeof(k_valhall_green_fs) - 8, 8);
+            memcpy(base + OFF_SHADER_ISA, shader_src + shader_len - 8, 8);
         } else if (g_shader_skip_atest) {
-            memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, 32);
-            memcpy(base + OFF_SHADER_ISA + 32,
-                   k_valhall_green_fs + 48, 8);
+            memcpy(base + OFF_SHADER_ISA, shader_src, 32);
+            memcpy(base + OFF_SHADER_ISA + 32, shader_src + 48, 8);
         } else {
-            memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+            memcpy(base + OFF_SHADER_ISA, shader_src, shader_len);
         }
         isa_addr = gva + OFF_SHADER_ISA;
     }
-    printf("shader_fbd: ISA at gpu 0x%llx (%s)\n",
+    printf("shader_fbd: ISA at gpu 0x%llx (%s, %s)\n",
            (unsigned long long)isa_addr,
-           g_shader_exec_cpu ? "GPU_EX exec page" : "fallback non-exec");
+           g_shader_exec_cpu ? "GPU_EX exec page" : "fallback non-exec",
+           g_shader_use_red ? "RED shader" : "GREEN shader");
 
     /* Build the v9 SHADER_PROGRAM descriptor (32 bytes / 8 words):
      *   word 0:
