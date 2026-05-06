@@ -48,6 +48,11 @@
 #define OFF_SHADER_TLS        0xD100
 #define OFF_SHADER_RESOURCES  0xD200  /* dummy resources table */
 #define OFF_SHADER_DEPTH      0xD300  /* DEPTH_STENCIL descriptor (32 bytes) */
+#define OFF_SHADER_FLUSH_JC   0xD400  /* Cache Flush Job (chained after Fragment) */
+#define OFF_TILER_HEAP_DESC   0xD500  /* TILER_HEAP descriptor (32 bytes) */
+#define OFF_TILER_CTX         0xD600  /* TILER_CONTEXT struct (192 bytes) */
+#define OFF_TILER_HEAP_BACKING 0x80000 /* 256 KiB backing for the tiler heap */
+#define TILER_HEAP_SIZE       0x40000 /* 256 KiB == minimum chunk size */
 
 struct base_dependency {
     uint8_t atom_id;
@@ -257,6 +262,12 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
     params[2] = (fb_w - 1) | ((fb_h - 1) << 16);
     params[3] = (0 << 0) | (2 << 6) | (8 << 9) | (0 << 19) | (1 << 24);
     params[4] = (1 << 16);  /* Z Internal Format = D24 */
+    /* params[5] = Z Clear (word 13) -- leave 0 */
+    /* NOTE: Tiler pointer at MFBD+0x38 is intentionally LEFT NULL.
+     * Setting it requires a fully-valid Tiler Context + Tiler Heap
+     * descriptor; with a zero-filled heap the GPU faults DATA_INVALID
+     * (0x58). Pre-Frame-Shader-only rendering does not need a valid
+     * tiler context — the GPU iterates tiles directly. */
 
     /* === RT0 descriptor (MFBD+0x80, 64 bytes) === */
     uint32_t *rt = (uint32_t *)(base + OFF_SCRATCH_RT);
@@ -359,10 +370,77 @@ static int g_shader_pre_frame_mode = 1;  /* 0=Never, 1=Always, 2=Intersect, 3=Ea
 static int g_shader_skip_atest    = 0;
 static int g_shader_use_minimal   = 0;
 static int g_shader_use_red       = 0;
+static int g_shader_with_tiler    = 0;   /* 1 = build & wire a Tiler Context */
 
 /* Separate executable shader allocation (must be GPU_EX). Set up in main(). */
 static uint64_t g_shader_exec_va = 0;
 static void *g_shader_exec_cpu = NULL;
+
+/* Build a v9 TILER_HEAP descriptor (32 bytes) at OFF_TILER_HEAP_DESC and a
+ * TILER_CONTEXT (192 bytes) at OFF_TILER_CTX. Wire the FBD's Tiler pointer
+ * (FBP word 14, MFBD+0x38) to the context.
+ *
+ * The heap backing storage is OFF_TILER_HEAP_BACKING (256 KiB) which we
+ * reserved in the main MEM_ALLOC. Without geometry the heap stays empty,
+ * but the GPU validates the descriptor.
+ *
+ * Tiler Heap struct (8 words):
+ *   word 0: Type=Buffer(9) | BufferType=TilerHeap(2) | ChunkSize=256KiB(0)
+ *   word 1: Size (aligned to 4 KiB)
+ *   words 2/3: Base
+ *   words 4/5: Bottom (= Base initially)
+ *   words 6/7: Top  (= Base + Size)
+ *
+ * Tiler Context struct (48 words = 192 bytes, align 64):
+ *   words 0/1: Polygon List (NULL — populated by tiler at runtime)
+ *   word 2:    Hierarchy Mask (13 bits) | Sample Pattern | flags
+ *   word 3:    FB Width-1 | FB Height-1
+ *   word 4:    Layer count-1 | Layer offset
+ *   word 5:    padding
+ *   words 6/7: Heap pointer (TILER_HEAP descriptor address)
+ *   words 8-15:  Weights (zero)
+ *   words 16-31: State (zero — initialized by GPU)
+ */
+static void build_tiler_context(void *cpu, uint64_t gva, int fb_w, int fb_h) {
+    uint8_t *base = (uint8_t *)cpu;
+
+    /* Heap descriptor (8 words / 32 bytes) */
+    uint32_t *th = (uint32_t *)(base + OFF_TILER_HEAP_DESC);
+    memset(th, 0, 32);
+    th[0] = (9u << 0)        /* Type = Buffer */
+          | (2u << 4)        /* Buffer type = Tiler heap */
+          | (0u << 8)        /* Chunk size = 256 KiB */
+          | (0u << 10);      /* Partitioning = Dynamic */
+    th[1] = (uint32_t)TILER_HEAP_SIZE;  /* Size in bytes (must be 4K-aligned) */
+    uint64_t heap_base = gva + OFF_TILER_HEAP_BACKING;
+    *(uint64_t *)(th + 2) = heap_base;
+    *(uint64_t *)(th + 4) = heap_base;                     /* Bottom = Base */
+    *(uint64_t *)(th + 6) = heap_base + TILER_HEAP_SIZE;   /* Top = Base + Size */
+
+    /* Tiler Context (48 words / 192 bytes) */
+    uint32_t *tc = (uint32_t *)(base + OFF_TILER_CTX);
+    memset(tc, 0, 192);
+    /* word 0/1 = Polygon List, leave 0 (filled in by tiler) */
+    tc[2] = (1u << 0)        /* Hierarchy Mask = 1 (smallest level) */
+          | (0u << 13);      /* Sample Pattern = Single-sampled (0) */
+    tc[3] = (uint32_t)((fb_w - 1) | ((fb_h - 1) << 16));
+    tc[4] = 0;               /* Layer count-1 = 0 (single layer) */
+    /* word 5 = padding */
+    *(uint64_t *)(tc + 6) = gva + OFF_TILER_HEAP_DESC;
+
+    /* Patch FBD's Tiler pointer at MFBD+0x38 (FBP word 14, params[6/7]) */
+    uint32_t *params = (uint32_t *)(base + OFF_SCRATCH_MFBD + 0x20);
+    *(uint64_t *)((uint8_t *)params + 24) = gva + OFF_TILER_CTX;
+
+    printf("tiler_ctx: heap_desc at gpu 0x%llx (backing 0x%llx, %d KiB)\n",
+           (unsigned long long)(gva + OFF_TILER_HEAP_DESC),
+           (unsigned long long)heap_base,
+           TILER_HEAP_SIZE / 1024);
+    printf("tiler_ctx: context at gpu 0x%llx wired to MFBD+0x38\n",
+           (unsigned long long)(gva + OFF_TILER_CTX));
+    dump_words("tiler heap desc", base + OFF_TILER_HEAP_DESC, 32);
+    dump_words("tiler context", base + OFF_TILER_CTX, 64);
+}
 
 static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64_t color_off) {
     uint8_t *base = (uint8_t *)cpu;
@@ -373,9 +451,10 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     if ((e = getenv("SHADER_SKIP_ATEST"))) g_shader_skip_atest    = atoi(e);
     if ((e = getenv("SHADER_MINIMAL"))   ) g_shader_use_minimal   = atoi(e);
     if ((e = getenv("SHADER_RED"))       ) g_shader_use_red       = atoi(e);
-    printf("shader_fbd variants: pre_frame_mode=%d skip_atest=%d minimal=%d red=%d\n",
+    if ((e = getenv("SHADER_TILER"))     ) g_shader_with_tiler    = atoi(e);
+    printf("shader_fbd variants: pre_frame_mode=%d skip_atest=%d minimal=%d red=%d tiler=%d\n",
            g_shader_pre_frame_mode, g_shader_skip_atest, g_shader_use_minimal,
-           g_shader_use_red);
+           g_shader_use_red, g_shader_with_tiler);
 
     /* Start from the proven scratch_fbd base */
     build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
@@ -426,14 +505,16 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     {
         uint32_t *sp = (uint32_t *)(base + OFF_SHADER_PROGRAM);
         memset(sp, 0, 32);
+        int helpers = getenv("SHADER_HELPERS") ? atoi(getenv("SHADER_HELPERS")) : 1;
         sp[0] = (8u << 0)        /* Type = Shader */
               | (2u << 4)        /* Stage = Fragment */
               | (1u << 8)        /* Coverage bitmask type = GL */
-              | (1u << 28)       /* Requires helper threads = true */
+              | ((helpers ? 1u : 0u) << 28) /* Requires helper threads */
               | (2u << 30);      /* Register allocation = 32 Per Thread */
         sp[1] = 0;               /* Preload = 0 */
         sp[2] = (uint32_t)(isa_addr & 0xFFFFFFFFu);
         sp[3] = (uint32_t)(isa_addr >> 32);
+        printf("shader_fbd: SHADER_PROGRAM helpers=%d\n", helpers);
     }
 
     /* Build a minimum dummy resources table (32 bytes zeroed). The shader does
@@ -603,11 +684,55 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     /* Disable the RT-write-enable clear path so we see the shader's output, not the clear.
      * Actually keep RT Write Enable=1 so the tile gets written back; just change clear color
      * to a sentinel so we can distinguish shader output from clear. */
-    uint32_t clear_sentinel = 0xFF0000FF;  /* solid red sentinel */
+    /* Set clear color so it differs from the expected shader output, otherwise
+     * we cannot distinguish "shader didn't run" from "shader ran successfully". */
+    uint32_t clear_sentinel = g_shader_use_red ? 0xFF00FF00 : 0xFF0000FF;
     *(uint32_t *)(base + OFF_SCRATCH_RT + 0x30) = clear_sentinel;
     *(uint32_t *)(base + OFF_SCRATCH_RT + 0x34) = clear_sentinel;
     *(uint32_t *)(base + OFF_SCRATCH_RT + 0x38) = clear_sentinel;
     *(uint32_t *)(base + OFF_SCRATCH_RT + 0x3C) = clear_sentinel;
+
+    /* Build a Cache Flush Job (Type 3) with L2 Clean = 1, and chain it
+     * after the Fragment Job. Without this, at 256x256 the GPU's tile
+     * writeback to memory races with the JOB_DONE event delivery, leaving
+     * some tiles still in L2 cache (CPU sees clear-color sentinel).
+     *
+     * Job Header (32 bytes):
+     *   word 0/1/2/3 = 0 (exception status, fault pointer)
+     *   word 4 [7:1] = Type (3 << 1 = 6)
+     *   word 5       = 0 (no deps in single-atom chain)
+     *   word 6/7     = Next pointer = 0 (terminate chain)
+     *
+     * Cache Flush Job Payload (8 bytes at offset 32):
+     *   word 0 bit 0  = Clean Shader Core LS = 1
+     *   word 0 bit 16 = Job Manager Clean    = 1
+     *   word 0 bit 24 = Tiler Clean          = 1
+     *   word 1 bit 0  = L2 Clean             = 1  (the critical one)
+     */
+    {
+        uint32_t *fl = (uint32_t *)(base + OFF_SHADER_FLUSH_JC);
+        memset(fl, 0, 64);
+        fl[4] = (3u << 1);                  /* Type = Cache flush */
+        /* fl[6/7] = Next = 0 (chain end) */
+        fl[8]  = (1u << 0)                  /* Clean Shader Core LS */
+               | (1u << 16)                 /* Job Manager Clean */
+               | (1u << 24);                /* Tiler Clean */
+        fl[9]  = (1u << 0);                 /* L2 Clean */
+    }
+    /* Patch the existing Fragment Job to chain to the Cache Flush Job. */
+    {
+        uint8_t *jc = base + OFF_SCRATCH_FRAG_JC;
+        *(uint64_t *)(jc + 0x18) = gva + OFF_SHADER_FLUSH_JC;
+    }
+
+    /* Optionally wire a real Tiler Context. With SHADER_TILER=1 we set up
+     * a TILER_HEAP descriptor + TILER_CONTEXT and patch FBD.Tiler. The
+     * suspicion is that 256x256 needs the GPU's tiler to know about the
+     * framebuffer extent so the per-shader-core tile-writeback is fully
+     * sequenced. */
+    if (g_shader_with_tiler) {
+        build_tiler_context(cpu, gva, fb_w, fb_h);
+    }
 
     printf("shader_fbd: shader ISA at gpu 0x%llx (%zu bytes)\n",
            (unsigned long long)(gva + OFF_SHADER_ISA), sizeof(k_valhall_green_fs));
@@ -618,6 +743,7 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     dump_words("shader ISA", base + OFF_SHADER_ISA, sizeof(k_valhall_green_fs));
     dump_words("shader DCD", base + OFF_SHADER_DCD, 128);
     dump_words("shader Blend", base + OFF_SHADER_BLEND, 16);
+    dump_words("shader Flush JC", base + OFF_SHADER_FLUSH_JC, 64);
     dump_words("shader MFBD (post-patch)", base + OFF_SCRATCH_MFBD, 0x80);
 }
 
@@ -659,6 +785,8 @@ int main(int argc, char **argv) {
     if (ioctl(fd, KBASE_IOCTL_SET_FLAGS, &flags) < 0) { perror("SET_FLAGS"); return 1; }
 
     size_t total_pages = 256;
+    /* 0x200F = CPU_RD|CPU_WR|GPU_RD|GPU_WR | SAME_VA(0x2000)
+     * Write-combine; reads bypass CPU cache. */
     uint64_t mem[4] = { total_pages, total_pages, 0, 0x200F };
     if (ioctl(fd, KBASE_IOCTL_MEM_ALLOC, mem) < 0) { perror("MEM_ALLOC"); return 1; }
     void *cpu = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem[1]);
@@ -746,17 +874,73 @@ int main(int argc, char **argv) {
         drain_events(fd);
 
         volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + color_off);
-        int changed = 0;
+        int changed = 0, n_green = 0, n_red = 0, n_other = 0;
+        uint32_t expected_shader = g_shader_use_red ? 0xff0000ff : 0xff00ff00;
+        uint32_t clear_sentinel  = g_shader_use_red ? 0xff00ff00 : 0xff0000ff;
+        int first_red_idx = -1, last_red_idx = -1;
         for (int i = 0; i < fb_w * fb_h; i++) {
-            if (color[i] != 0xdeadbeef) {
+            uint32_t v = color[i];
+            if (v != 0xdeadbeef) {
                 changed++;
-                if (changed <= 16) {
+                if (v == expected_shader) {
+                    n_green++;
+                } else if (v == clear_sentinel) {
+                    n_red++;
+                    if (first_red_idx < 0) first_red_idx = i;
+                    last_red_idx = i;
+                } else {
+                    n_other++;
+                    if (n_other <= 16) {
+                        int x = i % fb_w, y = i / fb_w;
+                        printf("color[%d] (%d,%d) = 0x%08x (other)\n", i, x, y, v);
+                    }
+                }
+                if (changed <= 4) {
                     int x = i % fb_w, y = i / fb_w;
-                    printf("color[%d] (%d,%d) = 0x%08x\n", i, x, y, color[i]);
+                    printf("color[%d] (%d,%d) = 0x%08x\n", i, x, y, v);
                 }
             }
         }
         printf("scratch_fbd: color changed=%d / %d (%dx%d)\n", changed, fb_w * fb_h, fb_w, fb_h);
+        printf("scratch_fbd: shader_color=%d clear_sentinel=%d other=%d\n", n_green, n_red, n_other);
+        if (n_red > 0) {
+            int fx = first_red_idx % fb_w, fy = first_red_idx / fb_w;
+            int lx = last_red_idx % fb_w, ly = last_red_idx / fb_w;
+            int ftx = fx / 16, fty = fy / 16;
+            int ltx = lx / 16, lty = ly / 16;
+            printf("scratch_fbd: first sentinel pixel idx=%d (%d,%d) tile=(%d,%d)\n",
+                   first_red_idx, fx, fy, ftx, fty);
+            printf("scratch_fbd: last  sentinel pixel idx=%d (%d,%d) tile=(%d,%d)\n",
+                   last_red_idx, lx, ly, ltx, lty);
+            /* Per-tile red count to identify which tiles failed to write back */
+            int tiles_x = (fb_w + 15) / 16;
+            int tiles_y = (fb_h + 15) / 16;
+            int total_tiles = tiles_x * tiles_y;
+            int *tile_red = calloc(total_tiles, sizeof(int));
+            if (tile_red) {
+                for (int i = 0; i < fb_w * fb_h; i++) {
+                    if (color[i] == clear_sentinel) {
+                        int x = i % fb_w, y = i / fb_w;
+                        tile_red[(y/16) * tiles_x + (x/16)]++;
+                    }
+                }
+                int affected = 0;
+                printf("scratch_fbd: tiles with sentinel pixels (out of %d):\n", total_tiles);
+                for (int ty = 0; ty < tiles_y; ty++) {
+                    for (int tx = 0; tx < tiles_x; tx++) {
+                        int c = tile_red[ty * tiles_x + tx];
+                        if (c > 0) {
+                            if (affected < 32) {
+                                printf("  tile (%d,%d) red=%d\n", tx, ty, c);
+                            }
+                            affected++;
+                        }
+                    }
+                }
+                printf("scratch_fbd: affected tiles=%d / %d\n", affected, total_tiles);
+                free(tile_red);
+            }
+        }
         if (changed == 0) {
             printf("scratch_fbd: NO pixels written\n");
         } else {
@@ -765,6 +949,9 @@ int main(int argc, char **argv) {
         dump_words("POST scratch MFBD", (uint8_t *)cpu + OFF_SCRATCH_MFBD, 0x80);
         dump_words("POST scratch RT0", (uint8_t *)cpu + OFF_SCRATCH_RT, 0x40);
         dump_words("POST scratch frag JC", (uint8_t *)cpu + OFF_SCRATCH_FRAG_JC, 0x40);
+        if (is_shader_mode) {
+            dump_words("POST shader Flush JC", (uint8_t *)cpu + OFF_SHADER_FLUSH_JC, 0x40);
+        }
         free(baseline);
         munmap(cpu, total_pages * PAGE_SIZE);
         close(fd);

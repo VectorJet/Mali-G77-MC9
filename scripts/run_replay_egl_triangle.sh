@@ -36,7 +36,7 @@ ssh -p "$DEVICE_PORT" "${DEVICE_USER}@${DEVICE_HOST}" \
 
 echo "[4/4] Run replay binary as root"
 ENV_PASS=""
-for v in SHADER_PFM SHADER_SKIP_ATEST SHADER_MINIMAL SHADER_RED; do
+for v in SHADER_PFM SHADER_SKIP_ATEST SHADER_MINIMAL SHADER_RED SHADER_TILER SHADER_HELPERS; do
     if [[ -n "${!v:-}" ]]; then
         ENV_PASS="${ENV_PASS} ${v}=${!v}"
     fi
