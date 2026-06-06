@@ -1,3 +1,6 @@
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -326,9 +329,37 @@ void glFinish(void) {
     (void)bridge_call(&req, &resp);
 }
 
+static void *shared_pixels = NULL;
+static void init_shm() {
+    if (shared_pixels) return;
+    int fd = open("/data/local/tmp/mali_bridge_pixels.bin", O_RDWR);
+    if (fd >= 0) {
+        shared_pixels = mmap(NULL, 32 * 1024 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        close(fd);
+    }
+}
+
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, void *pixels) {
     if (pixels && width > 0 && height > 0 && format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        init_shm();
+        fprintf(stderr, "shared_pixels is %p\n", shared_pixels);
+        if (shared_pixels) {
+            struct bridge_request req;
+            struct bridge_response resp;
+            memset(&req, 0, sizeof(req));
+            req.cmd = 999;
+            req.a[0] = (uint32_t)x;
+            req.a[1] = (uint32_t)y;
+            req.a[2] = (uint32_t)width;
+            req.a[3] = (uint32_t)height;
+            if (bridge_call(&req, &resp) == 0) {
+                memcpy(pixels, shared_pixels, (size_t)width * height * 4);
+                return;
+            }
+        }
+        
+        // Fallback to chunked read over socket
         uint8_t *out = pixels;
         const GLsizei max_tile_width = BRIDGE_MAX_BYTES / 4;
         for (GLsizei col = 0; col < width;) {

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdint.h>
@@ -113,6 +114,7 @@ struct surface_state {
     XShmSegmentInfo shm_info;
     XImage *shm_image;
     int shm_attached;
+    uint8_t *rgba_buffer;
 };
 
 struct context_state {
@@ -219,11 +221,16 @@ static int shm_ensure(struct surface_state *s, int w, int h) {
     return 1;
 }
 
+EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id);
+
+EGLDisplay eglGetPlatformDisplay(EGLenum platform, void *native_display, const void *attrib_list) {
+    (void)platform;
+    (void)attrib_list;
+    return eglGetDisplay((EGLNativeDisplayType)native_display);
+}
+
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
-    if (display_id != EGL_DEFAULT_DISPLAY) {
-        set_error(EGL_BAD_PARAMETER);
-        return EGL_NO_DISPLAY;
-    }
+    (void)display_id;
     set_error(EGL_SUCCESS);
     return display_handle();
 }
@@ -582,12 +589,9 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         return EGL_FALSE;
     }
     if (state->window_surface) {
-        typedef void (*finish_fn)(void);
-        typedef void (*read_pixels_fn)(int, int, int, int, unsigned int,
-                                       unsigned int, void *);
-        finish_fn bridge_finish = gles_symbol("glFinish");
+        typedef void (*read_pixels_fn)(int, int, int, int, unsigned int, unsigned int, void *);
         read_pixels_fn bridge_read_pixels = gles_symbol("glReadPixels");
-        if (!bridge_finish || !bridge_read_pixels) {
+        if (!bridge_read_pixels) {
             set_error(EGL_BAD_MATCH);
             return EGL_FALSE;
         }
@@ -599,11 +603,18 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
              win_attrs.height != state->height)) {
             state->width  = win_attrs.width;
             state->height = win_attrs.height;
+            if (state->rgba_buffer) {
+                free(state->rgba_buffer);
+                state->rgba_buffer = NULL;
+            }
         }
         size_t pixels_size = (size_t)state->width * state->height * 4;
-        uint8_t *rgba = malloc(pixels_size);
-        if (!rgba) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
-        bridge_finish();
+        if (!state->rgba_buffer) {
+            state->rgba_buffer = malloc(pixels_size);
+            if (!state->rgba_buffer) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
+        }
+        uint8_t *rgba = state->rgba_buffer;
+        
         bridge_read_pixels(0, 0, state->width, state->height,
                            0x1908, 0x1401, rgba);
         /* Cache GC per surface */
@@ -617,35 +628,31 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                 int src_y = state->height - 1 - y;
                 const uint8_t *src_row = rgba + (size_t)src_y * state->width * 4;
                 uint8_t       *dst_row = dst  + (size_t)y    * stride;
+                uint32_t *src32 = (uint32_t *)src_row;
+                uint32_t *dst32 = (uint32_t *)dst_row;
                 for (int x = 0; x < state->width; x++) {
-                    dst_row[x * 4 + 0] = src_row[x * 4 + 2];
-                    dst_row[x * 4 + 1] = src_row[x * 4 + 1];
-                    dst_row[x * 4 + 2] = src_row[x * 4 + 0];
-                    dst_row[x * 4 + 3] = 0;
+                    uint32_t p = src32[x];
+                    dst32[x] = (p & 0xFF00FF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
                 }
             }
-            free(rgba);
+            
             XShmPutImage(state->xdisplay, state->xwindow, state->gc,
                          state->shm_image, 0, 0, 0, 0,
                          (unsigned)state->width, (unsigned)state->height,
                          False);
-            XSync(state->xdisplay, False);
         } else {
             /* Fallback: XPutImage */
             uint8_t *bgra = malloc(pixels_size);
-            if (!bgra) { free(rgba); set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
+            if (!bgra) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
             for (int y = 0; y < state->height; y++) {
                 int src_y = state->height - 1 - y;
+                uint32_t *src32 = (uint32_t *)(rgba + (size_t)src_y * state->width * 4);
+                uint32_t *dst32 = (uint32_t *)(bgra + (size_t)y * state->width * 4);
                 for (int x = 0; x < state->width; x++) {
-                    size_t s = ((size_t)src_y * state->width + x) * 4;
-                    size_t d = ((size_t)y     * state->width + x) * 4;
-                    bgra[d+0] = rgba[s+2];
-                    bgra[d+1] = rgba[s+1];
-                    bgra[d+2] = rgba[s+0];
-                    bgra[d+3] = 0;
+                    uint32_t p = src32[x];
+                    dst32[x] = (p & 0xFF00FF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
                 }
             }
-            free(rgba);
             XImage *image = XCreateImage(state->xdisplay, win_attrs.visual,
                                          (unsigned)win_attrs.depth, ZPixmap, 0,
                                          (char *)bgra, (unsigned)state->width,
@@ -654,12 +661,12 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                 XPutImage(state->xdisplay, state->xwindow, state->gc, image,
                           0, 0, 0, 0,
                           (unsigned)state->width, (unsigned)state->height);
-                XSync(state->xdisplay, False);
-                XDestroyImage(image); /* frees bgra */
+                XDestroyImage(image);
             } else {
                 free(bgra);
             }
         }
+        XFlush(state->xdisplay);
     }
     set_error(EGL_SUCCESS);
     return EGL_TRUE;

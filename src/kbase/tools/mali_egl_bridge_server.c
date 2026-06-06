@@ -8,8 +8,20 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
 
+static void *shared_pixels = NULL;
+static void init_shm() {
+    if (shared_pixels) return;
+    int fd = open("/data/local/tmp/mali_bridge_pixels.bin", O_RDWR | O_CREAT, 0666);
+    if (fd < 0) return;
+    fchmod(fd, 0666);
+    ftruncate(fd, 32 * 1024 * 1024);
+    shared_pixels = mmap(NULL, 32 * 1024 * 1024, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+}
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
 typedef void *EGLSurface;
@@ -936,6 +948,14 @@ static void handle_request(struct gl_api *gl, const struct bridge_request *req,
         gl->glFinish();
         break;
 
+    case 999: {
+        uint32_t width = req->a[2];
+        uint32_t height = req->a[3];
+        if (shared_pixels) {
+            gl->glReadPixels((GLint)req->a[0], (GLint)req->a[1], (GLsizei)width, (GLsizei)height, 0x1908, 0x1401, shared_pixels);
+        }
+        break;
+    }
     case BRIDGE_CMD_READ_PIXELS:
         if ((uint64_t)req->a[2] * req->a[3] * 4 > BRIDGE_MAX_BYTES) {
             resp->status = 1;
@@ -1598,6 +1618,13 @@ static int make_server_socket(void) {
     return fd;
 }
 
+
+
+    
+    
+    
+    
+    
 int main(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -1772,7 +1799,7 @@ int main(void) {
         return 1;
     }
 
-    EGLint pbuf[] = {EGL_WIDTH, 64, EGL_HEIGHT, 64, EGL_NONE};
+    EGLint pbuf[] = {EGL_WIDTH, 3000, EGL_HEIGHT, 3000, EGL_NONE};
     EGLSurface surface = eglCreatePbufferSurface(display, config, pbuf);
     EGLint ctxattr[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
     EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctxattr);
@@ -1786,6 +1813,8 @@ int main(void) {
     gl.glUseProgram(program);
 
     int server_fd = make_server_socket();
+    init_shm();
+    init_shm();
     printf("mali-egl-bridge ready\n");
     printf("uid=%d euid=%d renderer=%s lib=%s socket=%s\n",
            getuid(), geteuid(), glGetString(GL_RENDERER), libpath, BRIDGE_SOCKET);

@@ -18,7 +18,7 @@ ssh -p "$DEVICE_PORT" "${DEVICE_USER}@${DEVICE_HOST}" \
     "su -c '${TERMUX_CLANG} -Wall -Wextra -O2 -o ${BIN_REMOTE} ${SRC_REMOTE} -ldl -llog && chmod 755 ${BIN_REMOTE}'"
 
 ssh -p "$DEVICE_PORT" "${DEVICE_USER}@${DEVICE_HOST}" \
-    "su -c 'if [ -f ${PID_REMOTE} ]; then kill -9 \$(cat ${PID_REMOTE}) 2>/dev/null || true; fi; for p in \$(pidof mali_egl_bridge_server 2>/dev/null); do kill -9 \$p 2>/dev/null || true; done; rm -f /data/local/tmp/mali_egl_bridge.sock ${LOG_REMOTE}; nohup ${BIN_REMOTE} > ${LOG_REMOTE} 2>&1 & echo \$! > ${PID_REMOTE}; sleep 1; cat ${LOG_REMOTE}'"
+    "su -c 'if [ -f ${PID_REMOTE} ]; then kill -9 \$(cat ${PID_REMOTE}) 2>/dev/null || true; fi; for p in \$(pidof mali_egl_bridge_server 2>/dev/null); do kill -9 \$p 2>/dev/null || true; done; rm -f /data/local/tmp/mali_egl_bridge.sock /data/local/tmp/mali_bridge_pixels.bin ${LOG_REMOTE}; nohup ${BIN_REMOTE} > ${LOG_REMOTE} 2>&1 & echo \$! > ${PID_REMOTE}; sleep 1; cat ${LOG_REMOTE}'"
 
 gcc -Wall -Wextra -O2 -o /tmp/mali_egl_bridge_client src/kbase/chroot/mali_egl_bridge_client.c
 /tmp/mali_egl_bridge_client 0.25 0.50 0.75 1.0
