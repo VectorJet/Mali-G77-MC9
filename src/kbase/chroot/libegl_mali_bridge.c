@@ -3,8 +3,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/XShm.h>
 
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
@@ -106,6 +109,10 @@ struct surface_state {
     EGLint mipmap_level;
     Display *xdisplay;
     Window xwindow;
+    GC gc;
+    XShmSegmentInfo shm_info;
+    XImage *shm_image;
+    int shm_attached;
 };
 
 struct context_state {
@@ -171,6 +178,45 @@ static void *gles_symbol(const char *name) {
     static void *gles;
     if (!gles) gles = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
     return gles ? dlsym(gles, name) : NULL;
+}
+
+
+static void shm_free(struct surface_state *s) {
+    if (!s->shm_image) return;
+    if (s->shm_attached) {
+        XShmDetach(s->xdisplay, &s->shm_info);
+        s->shm_attached = 0;
+    }
+    XDestroyImage(s->shm_image);
+    s->shm_image = NULL;
+    shmdt(s->shm_info.shmaddr);
+    shmctl(s->shm_info.shmid, IPC_RMID, 0);
+}
+
+static int shm_ensure(struct surface_state *s, int w, int h) {
+    if (s->shm_image &&
+        s->shm_image->width == w &&
+        s->shm_image->height == h)
+        return 1;
+    shm_free(s);
+    XWindowAttributes attrs;
+    XGetWindowAttributes(s->xdisplay, s->xwindow, &attrs);
+    s->shm_image = XShmCreateImage(s->xdisplay, attrs.visual,
+                                    (unsigned)attrs.depth, ZPixmap, NULL,
+                                    &s->shm_info, (unsigned)w, (unsigned)h);
+    if (!s->shm_image) return 0;
+    s->shm_info.shmid = shmget(IPC_PRIVATE,
+        (size_t)s->shm_image->bytes_per_line * h, IPC_CREAT | 0600);
+    if (s->shm_info.shmid < 0) { XDestroyImage(s->shm_image); s->shm_image = NULL; return 0; }
+    s->shm_info.shmaddr = s->shm_image->data = shmat(s->shm_info.shmid, NULL, 0);
+    if (s->shm_info.shmaddr == (void *)-1) {
+        shmctl(s->shm_info.shmid, IPC_RMID, 0);
+        XDestroyImage(s->shm_image); s->shm_image = NULL; return 0;
+    }
+    s->shm_info.readOnly = 0;
+    XShmAttach(s->xdisplay, &s->shm_info);
+    s->shm_attached = 1;
+    return 1;
 }
 
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
@@ -332,8 +378,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
         return EGL_NO_SURFACE;
     }
     XWindowAttributes attributes;
-    if (!XGetWindowAttributes(xdisplay, (Window)win, &attributes) ||
-        attributes.width != 64 || attributes.height != 64) {
+    if (!XGetWindowAttributes(xdisplay, (Window)win, &attributes)) {
         XCloseDisplay(xdisplay);
         set_error(EGL_BAD_MATCH);
         return EGL_NO_SURFACE;
@@ -546,47 +591,75 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             set_error(EGL_BAD_MATCH);
             return EGL_FALSE;
         }
+        /* Track window size changes */
+        XWindowAttributes win_attrs;
+        XGetWindowAttributes(state->xdisplay, state->xwindow, &win_attrs);
+        if (win_attrs.width > 0 && win_attrs.height > 0 &&
+            (win_attrs.width != state->width ||
+             win_attrs.height != state->height)) {
+            state->width  = win_attrs.width;
+            state->height = win_attrs.height;
+        }
         size_t pixels_size = (size_t)state->width * state->height * 4;
         uint8_t *rgba = malloc(pixels_size);
-        uint8_t *bgra = malloc(pixels_size);
-        if (!rgba || !bgra) {
-            free(rgba);
-            free(bgra);
-            set_error(EGL_BAD_PARAMETER);
-            return EGL_FALSE;
-        }
+        if (!rgba) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
         bridge_finish();
         bridge_read_pixels(0, 0, state->width, state->height,
                            0x1908, 0x1401, rgba);
-        for (int y = 0; y < state->height; y++) {
-            int source_y = state->height - 1 - y;
-            for (int x = 0; x < state->width; x++) {
-                size_t source = ((size_t)source_y * state->width + x) * 4;
-                size_t target = ((size_t)y * state->width + x) * 4;
-                bgra[target + 0] = rgba[source + 2];
-                bgra[target + 1] = rgba[source + 1];
-                bgra[target + 2] = rgba[source + 0];
-                bgra[target + 3] = 0;
+        /* Cache GC per surface */
+        if (!state->gc)
+            state->gc = XCreateGC(state->xdisplay, state->xwindow, 0, NULL);
+        /* MIT-SHM path: zero-copy to Xorg */
+        if (shm_ensure(state, state->width, state->height)) {
+            uint8_t *dst = (uint8_t *)state->shm_image->data;
+            int stride   = state->shm_image->bytes_per_line;
+            for (int y = 0; y < state->height; y++) {
+                int src_y = state->height - 1 - y;
+                const uint8_t *src_row = rgba + (size_t)src_y * state->width * 4;
+                uint8_t       *dst_row = dst  + (size_t)y    * stride;
+                for (int x = 0; x < state->width; x++) {
+                    dst_row[x * 4 + 0] = src_row[x * 4 + 2];
+                    dst_row[x * 4 + 1] = src_row[x * 4 + 1];
+                    dst_row[x * 4 + 2] = src_row[x * 4 + 0];
+                    dst_row[x * 4 + 3] = 0;
+                }
+            }
+            free(rgba);
+            XShmPutImage(state->xdisplay, state->xwindow, state->gc,
+                         state->shm_image, 0, 0, 0, 0,
+                         (unsigned)state->width, (unsigned)state->height,
+                         False);
+            XSync(state->xdisplay, False);
+        } else {
+            /* Fallback: XPutImage */
+            uint8_t *bgra = malloc(pixels_size);
+            if (!bgra) { free(rgba); set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
+            for (int y = 0; y < state->height; y++) {
+                int src_y = state->height - 1 - y;
+                for (int x = 0; x < state->width; x++) {
+                    size_t s = ((size_t)src_y * state->width + x) * 4;
+                    size_t d = ((size_t)y     * state->width + x) * 4;
+                    bgra[d+0] = rgba[s+2];
+                    bgra[d+1] = rgba[s+1];
+                    bgra[d+2] = rgba[s+0];
+                    bgra[d+3] = 0;
+                }
+            }
+            free(rgba);
+            XImage *image = XCreateImage(state->xdisplay, win_attrs.visual,
+                                         (unsigned)win_attrs.depth, ZPixmap, 0,
+                                         (char *)bgra, (unsigned)state->width,
+                                         (unsigned)state->height, 32, 0);
+            if (image) {
+                XPutImage(state->xdisplay, state->xwindow, state->gc, image,
+                          0, 0, 0, 0,
+                          (unsigned)state->width, (unsigned)state->height);
+                XSync(state->xdisplay, False);
+                XDestroyImage(image); /* frees bgra */
+            } else {
+                free(bgra);
             }
         }
-        free(rgba);
-        XWindowAttributes attributes;
-        XGetWindowAttributes(state->xdisplay, state->xwindow, &attributes);
-        XImage *image = XCreateImage(state->xdisplay, attributes.visual,
-                                     (unsigned int)attributes.depth, ZPixmap,
-                                     0, (char *)bgra, state->width,
-                                     state->height, 32, 0);
-        if (!image) {
-            free(bgra);
-            set_error(EGL_BAD_MATCH);
-            return EGL_FALSE;
-        }
-        GC gc = XCreateGC(state->xdisplay, state->xwindow, 0, NULL);
-        XPutImage(state->xdisplay, state->xwindow, gc, image, 0, 0, 0, 0,
-                  (unsigned int)state->width, (unsigned int)state->height);
-        XFreeGC(state->xdisplay, gc);
-        XSync(state->xdisplay, False);
-        XDestroyImage(image);
     }
     set_error(EGL_SUCCESS);
     return EGL_TRUE;
@@ -649,6 +722,8 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     }
     if (current_draw == surface) current_draw = EGL_NO_SURFACE;
     if (current_read == surface) current_read = EGL_NO_SURFACE;
+    shm_free(state);
+    if (state->gc) { XFreeGC(state->xdisplay, state->gc); state->gc = NULL; }
     if (state->xdisplay) XCloseDisplay(state->xdisplay);
     memset(state, 0, sizeof(*state));
     set_error(EGL_SUCCESS);
@@ -688,7 +763,11 @@ EGLBoolean eglTerminate(EGLDisplay dpy) {
     }
     display_state.initialized = 0;
     for (int i = 0; i < MAX_SURFACES; i++) {
-        if (surfaces[i].xdisplay) XCloseDisplay(surfaces[i].xdisplay);
+        if (surfaces[i].alive) {
+            shm_free(&surfaces[i]);
+            if (surfaces[i].gc) XFreeGC(surfaces[i].xdisplay, surfaces[i].gc);
+            if (surfaces[i].xdisplay) XCloseDisplay(surfaces[i].xdisplay);
+        }
     }
     memset(surfaces, 0, sizeof(surfaces));
     memset(contexts, 0, sizeof(contexts));
