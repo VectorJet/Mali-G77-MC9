@@ -18,7 +18,7 @@ gcc -Wall -Wextra -O2 -fPIC -shared \
     -Wl,-soname,libEGL.so.1 \
     -o /tmp/mali-bridge-lib/libEGL.so.1 \
     src/kbase/chroot/libegl_mali_bridge.c \
-    -ldl -lX11
+    -ldl -lX11 -lXext
 ln -sf libEGL.so.1 /tmp/mali-bridge-lib/libEGL.so
 
 gcc -Wall -Wextra -O2 \
