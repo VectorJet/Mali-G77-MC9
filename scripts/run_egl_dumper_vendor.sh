@@ -3,9 +3,9 @@ set -euo pipefail
 
 DEVICE_HOST="${DEVICE_HOST:-localhost}"
 DEVICE_PORT="${DEVICE_PORT:-8022}"
-DEVICE_USER="${DEVICE_USER:-u0_a659}"
+DEVICE_USER="${DEVICE_USER:-u0_a371}"
 
-SRC_LOCAL="src/kbase/egl_dumper_vendor.c"
+SRC_LOCAL="src/kbase/tools/egl_dumper_vendor.c"
 SRC_REMOTE="/data/data/com.termux/files/home/egl_dumper_vendor.c"
 BIN_REMOTE="/data/local/tmp/egl_dumper"
 TERMUX_CLANG="/data/data/com.termux/files/usr/bin/clang"

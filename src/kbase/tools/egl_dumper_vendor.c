@@ -1,10 +1,55 @@
-#include <EGL/egl.h>
-#include <GLES2/gl2.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+typedef void *EGLDisplay;
+typedef void *EGLConfig;
+typedef void *EGLSurface;
+typedef void *EGLContext;
+typedef void *EGLNativeDisplayType;
+typedef int EGLBoolean;
+typedef int EGLint;
+
+typedef unsigned int GLenum;
+typedef unsigned int GLuint;
+typedef unsigned int GLbitfield;
+typedef int GLint;
+typedef int GLsizei;
+typedef unsigned char GLboolean;
+typedef float GLfloat;
+typedef char GLchar;
+typedef unsigned char GLubyte;
+
+#define EGL_DEFAULT_DISPLAY ((EGLNativeDisplayType)0)
+#define EGL_NO_DISPLAY ((EGLDisplay)0)
+#define EGL_NO_SURFACE ((EGLSurface)0)
+#define EGL_NO_CONTEXT ((EGLContext)0)
+#define EGL_NONE 0x3038
+#define EGL_SURFACE_TYPE 0x3033
+#define EGL_PBUFFER_BIT 0x0001
+#define EGL_RENDERABLE_TYPE 0x3040
+#define EGL_OPENGL_ES2_BIT 0x0004
+#define EGL_RED_SIZE 0x3024
+#define EGL_GREEN_SIZE 0x3023
+#define EGL_BLUE_SIZE 0x3022
+#define EGL_ALPHA_SIZE 0x3021
+#define EGL_WIDTH 0x3057
+#define EGL_HEIGHT 0x3056
+#define EGL_CONTEXT_CLIENT_VERSION 0x3098
+
+#define GL_RENDERER 0x1F01
+#define GL_COMPILE_STATUS 0x8B81
+#define GL_LINK_STATUS 0x8B82
+#define GL_VERTEX_SHADER 0x8B31
+#define GL_FRAGMENT_SHADER 0x8B30
+#define GL_FLOAT 0x1406
+#define GL_FALSE 0
+#define GL_COLOR_BUFFER_BIT 0x00004000
+#define GL_TRIANGLES 0x0004
+#define GL_RGBA 0x1908
+#define GL_UNSIGNED_BYTE 0x1401
 
 typedef EGLDisplay (*PFN_eglGetDisplay_t)(EGLNativeDisplayType);
 typedef EGLBoolean (*PFN_eglInitialize_t)(EGLDisplay, EGLint*, EGLint*);

@@ -3,10 +3,10 @@ set -euo pipefail
 
 DEVICE_HOST="${DEVICE_HOST:-localhost}"
 DEVICE_PORT="${DEVICE_PORT:-8022}"
-DEVICE_USER="${DEVICE_USER:-u0_a659}"
+DEVICE_USER="${DEVICE_USER:-u0_a371}"
 
-DUMPER_SRC_LOCAL="src/kbase/egl_dumper_vendor.c"
-SPY_SRC_LOCAL="src/kbase/ioctl_spy.c"
+DUMPER_SRC_LOCAL="src/kbase/tools/egl_dumper_vendor.c"
+SPY_SRC_LOCAL="src/kbase/tools/ioctl_spy.c"
 TERMUX_STAGE_DIR="/data/data/com.termux/files/home"
 TERMUX_CLANG="/data/data/com.termux/files/usr/bin/clang"
 TMP_DUMPER_SRC="/data/data/com.termux/files/home/egl_dumper_vendor.c"
