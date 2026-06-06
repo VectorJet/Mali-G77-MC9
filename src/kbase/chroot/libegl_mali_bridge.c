@@ -9,6 +9,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XShm.h>
+#include <arm_neon.h>
 
 typedef void *EGLDisplay;
 typedef void *EGLConfig;
@@ -630,7 +631,17 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                 uint8_t       *dst_row = dst  + (size_t)y    * stride;
                 uint32_t *src32 = (uint32_t *)src_row;
                 uint32_t *dst32 = (uint32_t *)dst_row;
-                for (int x = 0; x < state->width; x++) {
+                int x = 0;
+#if defined(__aarch64__) || defined(__ARM_NEON)
+                for (; x + 15 < state->width; x += 16) {
+                    uint8x16x4_t pixels = vld4q_u8((const uint8_t *)&src32[x]);
+                    uint8x16_t tmp = pixels.val[0];
+                    pixels.val[0] = pixels.val[2];
+                    pixels.val[2] = tmp;
+                    vst4q_u8((uint8_t *)&dst32[x], pixels);
+                }
+#endif
+                for (; x < state->width; x++) {
                     uint32_t p = src32[x];
                     dst32[x] = (p & 0xFF00FF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
                 }
@@ -648,7 +659,17 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                 int src_y = state->height - 1 - y;
                 uint32_t *src32 = (uint32_t *)(rgba + (size_t)src_y * state->width * 4);
                 uint32_t *dst32 = (uint32_t *)(bgra + (size_t)y * state->width * 4);
-                for (int x = 0; x < state->width; x++) {
+                int x = 0;
+#if defined(__aarch64__) || defined(__ARM_NEON)
+                for (; x + 15 < state->width; x += 16) {
+                    uint8x16x4_t pixels = vld4q_u8((const uint8_t *)&src32[x]);
+                    uint8x16_t tmp = pixels.val[0];
+                    pixels.val[0] = pixels.val[2];
+                    pixels.val[2] = tmp;
+                    vst4q_u8((uint8_t *)&dst32[x], pixels);
+                }
+#endif
+                for (; x < state->width; x++) {
                     uint32_t p = src32[x];
                     dst32[x] = (p & 0xFF00FF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
                 }
