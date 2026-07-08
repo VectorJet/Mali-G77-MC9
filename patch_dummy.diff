@@ -1,0 +1,54 @@
+--- vkr_device_memory.c	2026-06-06 15:00:00.000000000 +0000
++++ vkr_device_memory_new.c	2026-06-06 15:00:00.000000000 +0000
+@@ -418,12 +418,34 @@
+ 
+    VkMemoryDedicatedAllocateInfo *dedicated = vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
+    if (export_info && (export_info->handleTypes & 0x00000400)) {
+        vkr_log("Allocating AHB: size=%lu, dedicated=%p (image=%p, buffer=%p)", alloc_info->allocationSize, dedicated, dedicated ? dedicated->image : NULL, dedicated ? dedicated->buffer : NULL);
+    }
+ 
++   VkBuffer dummy_buffer = VK_NULL_HANDLE;
++   VkMemoryDedicatedAllocateInfo dummy_dedicated = {
++       .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++       .buffer = VK_NULL_HANDLE,
++       .image = VK_NULL_HANDLE,
++   };
++   if (export_info && (export_info->handleTypes & 0x00000400) && !dedicated) {
++       VkExternalMemoryBufferCreateInfo ext_binfo = {
++           .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
++           .handleTypes = 0x00000400,
++       };
++       VkBufferCreateInfo binfo = {
++           .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++           .pNext = &ext_binfo,
++           .size = alloc_info->allocationSize,
++           .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++       };
++       if (dev->proc_table.CreateBuffer(dev->base.handle.device, &binfo, NULL, &dummy_buffer) == VK_SUCCESS) {
++           dummy_dedicated.pNext = alloc_info->pNext;
++           dummy_dedicated.buffer = dummy_buffer;
++           alloc_info->pNext = &dummy_dedicated;
++       }
++   }
++
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
+       if (local_import_info.fd >= 0)
+          close(local_import_info.fd);
+       if (gbm_bo)
+          vkr_gbm_bo_destroy(gbm_bo);
+       vkr_mtl_shm_free(mtl_shm);
++      if (dummy_buffer != VK_NULL_HANDLE)
++         dev->proc_table.DestroyBuffer(dev->base.handle.device, dummy_buffer, NULL);
+       return;
+    }
+ 
+@@ -438,6 +460,8 @@
+    mem->mtl_shm = mtl_shm;
+    mem->allocation_size = alloc_info->allocationSize;
+    mem->memory_type_index = mem_type_index;
++   // Hack: store dummy buffer in udmabuf_fd if not used? No, add a field to struct, but we don't have one easily without modifying header.
++   // Let's just destroy it after allocation! Vulkan spec says memory must not be freed until buffer is destroyed, but maybe we can destroy buffer before memory is freed? Yes! The spec says "memory MUST NOT be freed until buffer is destroyed", which means buffer MUST be destroyed first!
++   if (dummy_buffer != VK_NULL_HANDLE)
++       dev->proc_table.DestroyBuffer(dev->base.handle.device, dummy_buffer, NULL);
+ }
