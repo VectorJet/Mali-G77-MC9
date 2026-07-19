@@ -12,6 +12,29 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/*
+ * Kernel UAPI reference headers (verified from refs/mesa-Panfork-android/):
+ *   mali_kbase_jm_ioctl.h  — JOB_SUBMIT, VERSION_CHECK ioctls + structs
+ *   mali_base_jm_kernel.h  — base_jd_atom (64 B), core_req flags, event codes
+ *   mali_base_kernel.h     — MEM_ALLOC flags (BASE_MEM_SAME_VA, etc.)
+ *   mali_kbase_ioctl.h     — MEM_ALLOC, SET_FLAGS, GET_GPUPROPS ioctls
+ *
+ * Valhall descriptor definitions (from refs/panfork/):
+ *   src/panfrost/lib/genxml/v9.xml  — MFBD, DCD, blend, tiler structures
+ *   src/panfrost/compiler/valhall/test/assembler-cases.txt  — ISA encodings
+ *   src/panfrost/lib/kmod/          — pan_kmod API (kmod abstraction layer)
+ */
+
+/* Official kernel UAPI ioctl defines (refs/mesa-Panfork-android/):
+ * struct kbase_ioctl_version_check { u16 major, u16 minor; };
+ * #define KBASE_IOCTL_VERSION_CHECK _IOWR(0x80, 0, struct kbase_ioctl_version_check)
+ * struct kbase_ioctl_set_flags { u32 create_flags; };
+ * #define KBASE_IOCTL_SET_FLAGS _IOW(0x80, 1, struct kbase_ioctl_set_flags)
+ * struct kbase_ioctl_job_submit { u64 addr; u32 nr_atoms; u32 stride; };
+ * #define KBASE_IOCTL_JOB_SUBMIT _IOW(0x80, 2, struct kbase_ioctl_job_submit)
+ * union kbase_ioctl_mem_alloc { in/out structs };
+ * #define KBASE_IOCTL_MEM_ALLOC _IOWR(0x80, 5, union kbase_ioctl_mem_alloc)
+ */
 #define KBASE_IOCTL_VERSION_CHECK  _IOC(_IOC_READ|_IOC_WRITE, 0x80, 0, 4)
 #define KBASE_IOCTL_SET_FLAGS      _IOC(_IOC_WRITE, 0x80, 1, 4)
 #define KBASE_IOCTL_JOB_SUBMIT     _IOC(_IOC_WRITE, 0x80, 2, 16)
@@ -53,6 +76,17 @@
 #define OFF_TILER_CTX         0xD600  /* TILER_CONTEXT struct (192 bytes) */
 #define OFF_TILER_HEAP_BACKING 0x80000 /* 256 KiB backing for the tiler heap */
 #define TILER_HEAP_SIZE       0x40000 /* 256 KiB == minimum chunk size */
+
+/* Triangle mode offsets (MALLOC_VERTEX_JOB approach) */
+#define OFF_TRI_POS           0xE000  /* Position buffer (3 x vec4 = 48 bytes) */
+#define OFF_TRI_BLEND         0xE040  /* Blend descriptor (16 bytes) */
+#define OFF_TRI_DEPTH         0xE060  /* Depth/stencil descriptor (32 bytes) */
+#define OFF_TRI_TLS           0xE0A0  /* TLS/Local Storage (32 bytes) */
+#define OFF_TRI_RES_TABLE     0xE0D0  /* Resource table (64 bytes, 4 entries x 16 bytes) */
+#define OFF_TRI_ATTR          0xE120  /* Attribute descriptor (32 bytes) */
+#define OFF_TRI_ATTR_BUF      0xE140  /* Attribute BUFFER descriptor (32 bytes) */
+#define OFF_TRI_VTX_JOB       0xE200  /* MALLOC_VERTEX_JOB (384 bytes, 128-align at 0xE200=113*128) */
+#define OFF_TRI_FRAG_JC       0xE380  /* Fragment JC (128 bytes, 128-align at 0xE380) */
 
 struct base_dependency {
     uint8_t atom_id;
@@ -376,6 +410,11 @@ static int g_shader_with_tiler    = 0;   /* 1 = build & wire a Tiler Context */
 static uint64_t g_shader_exec_va = 0;
 static void *g_shader_exec_cpu = NULL;
 
+/* Triangle mode tuneables */
+static int g_triangle_fb_w = 256;
+static int g_triangle_fb_h = 256;
+static int g_triangle_use_fs = 1;  /* 1 = use our hand-crafted fragment shader */
+
 /* Build a v9 TILER_HEAP descriptor (32 bytes) at OFF_TILER_HEAP_DESC and a
  * TILER_CONTEXT (192 bytes) at OFF_TILER_CTX. Wire the FBD's Tiler pointer
  * (FBP word 14, MFBD+0x38) to the context.
@@ -420,7 +459,11 @@ static void build_tiler_context(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     /* Tiler Context (48 words / 192 bytes) */
     uint32_t *tc = (uint32_t *)(base + OFF_TILER_CTX);
     memset(tc, 0, 192);
-    /* word 0/1 = Polygon List, leave 0 (filled in by tiler) */
+    /* word 0/1 = Polygon List — MUST point to valid writable memory!
+     * The tiler writes the produced polygon list here during binning.
+     * NULL (0) causes DATA_INVALID (0x58) as the GPU faults on the
+     * write to address zero. */
+    *(uint64_t *)(tc + 0) = gva + OFF_SCRATCH_POLYLIST;
     tc[2] = (1u << 0)        /* Hierarchy Mask = 1 (smallest level) */
           | (0u << 13);      /* Sample Pattern = Single-sampled (0) */
     tc[3] = (uint32_t)((fb_w - 1) | ((fb_h - 1) << 16));
@@ -747,6 +790,236 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     dump_words("shader MFBD (post-patch)", base + OFF_SCRATCH_MFBD, 0x80);
 }
 
+/* Build a full triangle rendering pipeline using v9 MALLOC_VERTEX_JOB (type=11).
+ *
+ * MALLOC_VERTEX_JOB (384 bytes) is the v9-native vertex job format. It adds
+ * Position/Varying Shader Environments at the end of the job and includes an
+ * Allocation section at offset 52. The Draw/Shader Environment provides
+ * the fragment shader; the Position/Varying SEs are zeroed (no vertex
+ * shader needed — we supply screen-space positions via the Vertex Array).
+ *
+ * Memory layout of MALLOC_VERTEX_JOB (384 bytes, align 128):
+ *   +0x000: Header (32B, type=11)
+ *   +0x020: Primitive (16B)
+ *   +0x030: Instance Count (4B)
+ *   +0x034: Allocation (4B): vertex_attribute_stride
+ *   +0x038: Tiler Pointer (8B)
+ *   +0x068: Scissor (8B)
+ *   +0x070: Primitive Size (8B)
+ *   +0x078: Indices (8B)
+ *   +0x080: Draw (128B)
+ *   +0x100: Position Shader Environment (64B)
+ *   +0x140: Varying Shader Environment (64B)
+ */
+static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
+    uint8_t *base = (uint8_t *)cpu;
+    printf("\n=== BUILD TRIANGLE MODE (MALLOC_VERTEX_JOB, type=11) ===\n");
+    printf("framebuffer %dx%d\n", fb_w, fb_h);
+
+    g_triangle_fb_w = fb_w;
+    g_triangle_fb_h = fb_h;
+
+    /* === 1. Build scratch MFBD + RT with Frame Shaders ===
+     * The fragment shader is wired through the FBD's Frame Shader DCD
+     * (MFBD+0x18 → DCD array with Draw struct → SHADER_PROGRAM → ISA).
+     * This is REQUIRED — the MALLOC_VERTEX_JOB's Draw Shader Environment
+     * provides only the VERTEX shader, NOT the fragment shader. */
+    uint64_t color_off = (fb_w * fb_h * 4 > 0x1000) ? OFF_SCRATCH_COLOR_LG : OFF_SCRATCH_COLOR;
+    build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+
+    /* Enable Pre Frame 0 = Always and wire the DCD pointer (like shader_fbd) */
+    uint32_t *mfbd = (uint32_t *)(base + OFF_SCRATCH_MFBD);
+    mfbd[0] = 1;  /* Pre Frame 0 = Always */
+    *(uint64_t *)(base + OFF_SCRATCH_MFBD + 0x18) = gva + OFF_SHADER_DCD;
+
+    build_tiler_context(cpu, gva, fb_w, fb_h);
+
+    /* === 2. Position buffer: 3 full-screen triangle vertices (screen-space) === */
+    {
+        float *pos = (float *)(base + OFF_TRI_POS);
+        pos[0]  = 0.0f;               pos[1]  = 0.0f;       pos[2]  = 0.0f; pos[3]  = 1.0f;
+        pos[4]  = (float)(2 * fb_w);  pos[5]  = 0.0f;       pos[6]  = 0.0f; pos[7]  = 1.0f;
+        pos[8]  = 0.0f;               pos[9]  = (float)(2 * fb_h); pos[10] = 0.0f; pos[11] = 1.0f;
+    }
+    uint64_t pos_addr = gva + OFF_TRI_POS;
+    printf("triangle: position buffer at gpu 0x%llx\n", (unsigned long long)pos_addr);
+
+    /* === 3. Fragment SHADER_PROGRAM descriptor === */
+    uint64_t isa_addr;
+    if (g_shader_exec_cpu && g_shader_exec_va) {
+        memcpy(g_shader_exec_cpu, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+        isa_addr = g_shader_exec_va;
+    } else {
+        memcpy(base + OFF_SHADER_ISA, k_valhall_green_fs, sizeof(k_valhall_green_fs));
+        isa_addr = gva + OFF_SHADER_ISA;
+    }
+    printf("triangle: fragment shader ISA at gpu 0x%llx\n", (unsigned long long)isa_addr);
+
+    uint32_t *sp = (uint32_t *)(base + OFF_SHADER_PROGRAM);
+    memset(sp, 0, 32);
+    sp[0] = (8u << 0) | (2u << 4) | (1u << 8) | (1u << 28) | (2u << 30);
+    sp[2] = (uint32_t)(isa_addr & 0xFFFFFFFFu);
+    sp[3] = (uint32_t)(isa_addr >> 32);
+    uint64_t sp_addr = gva + OFF_SHADER_PROGRAM;
+    printf("triangle: SHADER_PROGRAM at gpu 0x%llx\n", (unsigned long long)sp_addr);
+
+    /* === 4. Descriptors: Blend, Depth/stencil, TLS === */
+    {
+        uint32_t *bl = (uint32_t *)(base + OFF_TRI_BLEND);
+        bl[0] = (1u << 9);
+        bl[1] = (2u << 0) | (2u << 4) | (1u << 8) |
+                ((2u << 0) | (2u << 4) | (1u << 8)) << 12 | (0xFu << 28);
+        bl[2] = (2u << 0) | (3u << 3) | (0u << 16);
+        bl[3] = (237u << 12) | 0u;
+    }
+    uint64_t blend_addr = gva + OFF_TRI_BLEND;
+
+    {
+        uint32_t *zs = (uint32_t *)(base + OFF_TRI_DEPTH);
+        memset(zs, 0, 32);
+        zs[0] = (7u << 0) | (7u << 4) | (7u << 16);
+        zs[4] = (1u << 22) | (7u << 29);
+    }
+    uint64_t depth_addr = gva + OFF_TRI_DEPTH;
+
+    {
+        uint32_t *ls = (uint32_t *)(base + OFF_TRI_TLS);
+        memset(ls, 0, 32);
+        ls[0] = 0;
+        ls[1] = 0x80000000u;
+        uint64_t tls_base = gva + OFF_SCRATCH_HEAP;
+        ls[2] = (uint32_t)(tls_base & 0xFFFFFFFFu);
+        ls[3] = (uint32_t)((tls_base >> 32) & 0xFFFFu);
+    }
+    uint64_t tls_addr = gva + OFF_TRI_TLS;
+
+    memset(base + OFF_TRI_RES_TABLE, 0, 64);
+    uint64_t res_table_addr = gva + OFF_TRI_RES_TABLE;
+
+    /* === 4b. Frame Shader DCD at OFF_SHADER_DCD (reuse shader_fbd area) ===
+     * The FBD's Frame Shader DCD pointer (MFBD+0x18) points here.
+     * This is an array of 3 Draw descriptors (3 × 128 bytes = 384 bytes)
+     * for Pre Frame 0, Pre Frame 1, Post Frame. Only Pre Frame 0 = Always
+     * needs population. The Draw struct inside provides the fragment shader
+     * (via Shader Environment → SHADER_PROGRAM) and associated descriptors. */
+    {
+        uint32_t *dcd = (uint32_t *)(base + OFF_SHADER_DCD);
+        memset(dcd, 0, 3 * 128);
+
+        /* Pre Frame 0 DCD */
+        dcd[0] = (1u << 0) | (1u << 1) | (1u << 6);  /* Flags */
+        dcd[1] = 0xFFFF | (0x1u << 16);               /* Sample mask + RT mask */
+        dcd[6] = 0x00000000;                           /* Min Z */
+        dcd[7] = 0x3F800000;                           /* Max Z */
+        *(uint64_t *)(dcd + 10) = depth_addr;          /* Depth/stencil */
+        /* Blend count(4) | Blend addr(shr 4, 60 bits) */
+        {
+            uint64_t bs = blend_addr >> 4;
+            dcd[12] = (1u & 0x0F) | ((uint32_t)(bs & 0x0FFFFFFF) << 4);
+            dcd[13] = (uint32_t)((bs >> 28) & 0xFFFFFFFF);
+        }
+        *(uint64_t *)(dcd + 14) = 0;                   /* Occlusion = 0 */
+        /* Shader Environment at words 16-31 */
+        dcd[24] = 0;  dcd[25] = 0;  /* Resources = 0, table_count = 0 */
+        dcd[26] = (uint32_t)(sp_addr & 0xFFFFFFFFu);
+        dcd[27] = (uint32_t)(sp_addr >> 32);
+        dcd[28] = (uint32_t)(tls_addr & 0xFFFFFFFFu);
+        dcd[29] = (uint32_t)(tls_addr >> 32);
+        /* dcd[30/31] = FAU = 0 (already zeroed) */
+    }
+    printf("triangle: Frame Shader DCD at gpu 0x%llx\n",
+           (unsigned long long)(gva + OFF_SHADER_DCD));
+
+    /* === 5. Build TILER_JOB (256 bytes at OFF_TRI_VTX_JOB = 0xE200) ===
+     * TILER_JOB is simpler than MALLOC_VERTEX_JOB — no Position/Varying
+     * Shader Environments that may fault when zeroed. Still has the
+     * Draw struct for the vertex shader (shader=0 = no vertex shader).
+     * The fragment shader comes from the FBD's Frame Shader DCD. */
+    uint32_t *vt = (uint32_t *)(base + OFF_TRI_VTX_JOB);
+    memset(vt, 0, 256);
+    uint64_t tiler_ctx_addr = gva + OFF_TILER_CTX;
+    uint64_t vtx_job_addr = gva + OFF_TRI_VTX_JOB;
+
+    /* 5a. Header (words 0-7): Type=7 (Tiler), 64-bit, Next=Fragment JC */
+    vt[4] = (1u << 0) | (7u << 1);
+    *(uint64_t *)(vt + 6) = gva + OFF_TRI_FRAG_JC;
+
+    /* 5b. Primitive (words 8-11, offset 0x20) */
+    vt[8]    = (8u << 0)  | (1u << 15) | (1u << 16) | (1u << 17);
+    vt[9]    = 0;       /* Base vertex offset */
+    vt[10]   = 0;       /* Instance offset */
+    vt[11]   = 3;       /* Index count = 3 */
+
+    /* 5c. Instance Count (word 12, offset 0x30) */
+    vt[12] = 1;
+
+    /* 5d. Vertex Count (word 13, offset 0x34) — TILER_JOB only */
+    vt[13] = 3;
+
+    /* 5e. Tiler Pointer (words 14-15, offset 0x38) */
+    *(uint64_t *)(vt + 14) = tiler_ctx_addr;
+
+    /* 5f. Scissor (words 26-27, offset 0x68) */
+    vt[26] = 0;
+    vt[27] = (fb_w - 1) | ((fb_h - 1) << 16);
+
+    /* 5g. Primitive Size (words 28-29, offset 0x70) */
+    *(float *)(vt + 28) = 1.0f;
+
+    /* 5h. Indices (words 30-31, offset 0x78) */
+    *(uint64_t *)(vt + 30) = 0;
+
+    /* 5i. Draw (words 32-63, offset 0x80, 128 bytes) */
+    uint32_t *dw = vt + 32;
+    dw[0] = (1u << 0) | (1u << 1) | (1u << 6);
+    dw[1] = 0xFFFF | (0x1u << 16);
+    /* Vertex Array */
+    {
+        uint64_t V = pos_addr >> 6;
+        dw[2] = (uint32_t)((V & 0x03FFFFFFu)) << 6;
+        dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu);
+        dw[4] = (16u << 16);
+    }
+    dw[6] = 0x00000000;  /* Min Z */
+    dw[7] = 0x3F800000;  /* Max Z */
+    *(uint64_t *)(dw + 10) = depth_addr;  /* Depth/stencil */
+    /* Blend: count(4 bits low) | addr(shr 4, 60 bits) */
+    {
+        uint64_t blend_stored = blend_addr >> 4;
+        dw[12] = (1u & 0x0F) | ((uint32_t)(blend_stored & 0x0FFFFFFF) << 4);
+        dw[13] = (uint32_t)((blend_stored >> 28) & 0xFFFFFFFF);
+    }
+    *(uint64_t *)(dw + 14) = 0;  /* Occlusion = 0 */
+
+    /* Shader Environment (words 16-31) — vertex shader: shader=0 */
+    uint32_t *se = dw + 16;
+    se[0] = 0;  /* Attribute offset */
+    se[1] = 0;  /* FAU count */
+    *(uint64_t *)(se + 8)  = 0 | 0ULL;  /* Resources = 0 */
+    *(uint64_t *)(se + 10) = 0;          /* Shader = 0 (no VS) */
+    *(uint64_t *)(se + 12) = 0;          /* Thread storage = 0 */
+    *(uint64_t *)(se + 14) = 0;          /* FAU = 0 */
+
+    printf("triangle: TILER_JOB at gpu 0x%llx\n", (unsigned long long)vtx_job_addr);
+    dump_words("TJ header+prim+counts", base + OFF_TRI_VTX_JOB, 64);
+    dump_words("TJ scissor+size+indices", base + OFF_TRI_VTX_JOB + 0x68, 24);
+    dump_words("TJ Draw (DCD)", base + OFF_TRI_VTX_JOB + 0x80, 128);
+
+    /* === 6. Fragment Job (128 bytes at OFF_TRI_FRAG_JC = 0xE380) === */
+    uint32_t *fj = (uint32_t *)(base + OFF_TRI_FRAG_JC);
+    memset(fj, 0, 128);
+    fj[4] = (1u << 0) | (9u << 1);
+    fj[8] = 0;
+    fj[9] = ((fb_w / 16) - 1) | (((fb_h / 16) - 1) << 16);
+    *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;
+    *(uint64_t *)(fj + 12) = 0;
+    fj[14] = 0;
+
+    printf("triangle: Fragment JC at gpu 0x%llx\n", (unsigned long long)(gva + OFF_TRI_FRAG_JC));
+    dump_words("triangle Fragment JC", base + OFF_TRI_FRAG_JC, 64);
+    printf("=== BUILD TRIANGLE MODE DONE ===\n\n");
+}
+
 static void drain_events(int fd) {
     for (int i = 0; i < 8; i++) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -846,17 +1119,125 @@ int main(int argc, char **argv) {
     atoms[3].jc = gva + OFF_SOFT3;
 
     int is_shader_mode = (strncmp(mode, "shader_fbd", 10) == 0);
+    int is_triangle_mode = (strcmp(mode, "triangle") == 0 || strcmp(mode, "triangle_64") == 0
+                            || strcmp(mode, "triangle_256") == 0);
     if (strcmp(mode, "scratch_fbd") == 0 || strcmp(mode, "scratch_fbd_64") == 0
         || strcmp(mode, "scratch_fbd_256") == 0
-        || is_shader_mode) {
+        || is_shader_mode || is_triangle_mode) {
         int fb_w = 16, fb_h = 16;
         if (strstr(mode, "_256")) { fb_w = 256; fb_h = 256; }
         else if (strstr(mode, "_64")) { fb_w = 64; fb_h = 64; }
         uint64_t color_off = (fb_w * fb_h * 4 > 0x1000) ? OFF_SCRATCH_COLOR_LG : OFF_SCRATCH_COLOR;
-        if (is_shader_mode) {
+        if (is_triangle_mode) {
+            build_triangle_mode(cpu, gva, fb_w, fb_h);
+        } else if (is_shader_mode) {
             build_shader_fbd(cpu, gva, fb_w, fb_h, color_off);
         } else {
             build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
+        }
+
+        if (is_triangle_mode) {
+            /* Diagnostic: Try the Fragment JC standalone, WITHOUT tiler
+             * context. Temporarily zero MFBD+0x38 so the fragment job
+             * falls back to tile iteration over all tiles.
+             * Build_tiler_context() already patched it, so save & restore. */
+            uint8_t *mfbd_reg = (uint8_t *)cpu + OFF_SCRATCH_MFBD;
+            uint64_t saved_tiler_ptr = *(uint64_t *)(mfbd_reg + 0x38);
+            *(uint64_t *)(mfbd_reg + 0x38) = 0;  /* Tiler = NULL → iterate all tiles */
+
+            struct kbase_atom_mtk frag_only_atom;
+            memset(&frag_only_atom, 0, sizeof(frag_only_atom));
+            frag_only_atom.jc = gva + OFF_TRI_FRAG_JC;
+            frag_only_atom.atom_number = 1;
+            frag_only_atom.core_req = 0x001;
+
+            struct kbase_ioctl_job_submit sub_diag = {0};
+            sub_diag.addr = (uint64_t)&frag_only_atom;
+            sub_diag.nr_atoms = 1;
+            sub_diag.stride = sizeof(struct kbase_atom_mtk);
+            int ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_diag);
+            printf("JOB_SUBMIT (frag_only_diag, no tiler) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+            drain_events(fd);
+
+            /* Restore Tiler pointer for the full chain.
+             * The MALLOC_VERTEX_JOB's tiler step will populate the
+             * polygon list at 0x7000, then the Fragment JC reads it. */
+            *(uint64_t *)(mfbd_reg + 0x38) = saved_tiler_ptr;
+
+            /* Diagnostic: Submit TILER_JOB standalone (no Next pointer,
+             * no chain) to see if the tiler itself works. */
+            {
+                /* Temporarily zero the Next pointer so the tiler job
+                 * terminates immediately after binning */
+                uint8_t *vj = (uint8_t *)cpu + OFF_TRI_VTX_JOB;
+                uint64_t saved_next = *(uint64_t *)(vj + 0x18);
+                *(uint64_t *)(vj + 0x18) = 0;
+
+                struct kbase_atom_mtk tiler_only_atom;
+                memset(&tiler_only_atom, 0, sizeof(tiler_only_atom));
+                tiler_only_atom.jc = gva + OFF_TRI_VTX_JOB;
+                tiler_only_atom.atom_number = 1;
+                tiler_only_atom.core_req = 0x001;
+
+                struct kbase_ioctl_job_submit sub_tiler = {0};
+                sub_tiler.addr = (uint64_t)&tiler_only_atom;
+                sub_tiler.nr_atoms = 1;
+                sub_tiler.stride = sizeof(struct kbase_atom_mtk);
+                int ret_tiler = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_tiler);
+                printf("JOB_SUBMIT (tiler_only) ret=%d errno=%d (%s)\n", ret_tiler, errno, strerror(errno));
+                drain_events(fd);
+
+                /* Restore Next pointer */
+                *(uint64_t *)(vj + 0x18) = saved_next;
+            }
+
+            /* Now submit the full triangle chain */
+            struct kbase_atom_mtk tri_atom;
+            memset(&tri_atom, 0, sizeof(tri_atom));
+            tri_atom.jc = gva + OFF_TRI_VTX_JOB;
+            tri_atom.atom_number = 1;
+            tri_atom.core_req = 0x001;
+
+            struct kbase_ioctl_job_submit sub = {0};
+            sub.addr = (uint64_t)&tri_atom;
+            sub.nr_atoms = 1;
+            sub.stride = sizeof(struct kbase_atom_mtk);
+            ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub);
+            printf("JOB_SUBMIT (triangle) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+            drain_events(fd);
+
+            /* Check color buffer for shader output */
+            volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + color_off);
+            int changed = 0, n_green = 0, n_red = 0, n_other = 0;
+            uint32_t expected_green = 0xff00ff00;
+            uint32_t expected_red   = 0xff0000ff;
+            for (int i = 0; i < fb_w * fb_h; i++) {
+                uint32_t v = color[i];
+                if (v != 0xdeadbeef) {
+                    changed++;
+                    if (v == expected_green) {
+                        n_green++;
+                    } else if (v == expected_red) {
+                        n_red++;
+                    } else if (v == 0xdeadbeef) {
+                    } else {
+                        n_other++;
+                        if (n_other <= 16) {
+                            int x = i % fb_w, y = i / fb_w;
+                            printf("color[%d] (%d,%d) = 0x%08x (other)\n", i, x, y, v);
+                        }
+                    }
+                }
+            }
+            printf("triangle: color changed=%d / %d (%dx%d)\n", changed, fb_w * fb_h, fb_w, fb_h);
+            printf("triangle: green=%d red=%d other=%d\n", n_green, n_red, n_other);
+            if (changed > 0) {
+                printf("triangle: first=0x%08x last=0x%08x\n", color[0], color[fb_w*fb_h-1]);
+            }
+            free(baseline);
+            munmap(cpu, total_pages * PAGE_SIZE);
+            close(fd);
+            return 0;
         }
 
         struct kbase_atom_mtk frag_atom;

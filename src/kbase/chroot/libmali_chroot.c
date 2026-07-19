@@ -119,7 +119,11 @@ int mali_init(void) {
         return -1;
     }
 
-    uint32_t create_flags = 0;
+    /* BASE_CONTEXT_CCTX_EMBEDDED (bit 0) — signals a GLES-embedded context.
+     * MTK kbase gates tiler job submission on this flag being set.
+     * Passing 0 (BASE_CONTEXT_CREATE_FLAG_NONE) leaves the context "bare"
+     * and tiler jobs (type 7) fault before execution. */
+    uint32_t create_flags = 1; /* BASE_CONTEXT_CCTX_EMBEDDED */
     ret = ioctl(mali_fd, KBASE_IOCTL_SET_FLAGS, &create_flags);
     if (ret < 0) {
         fprintf(stderr, "[mali] SET_FLAGS failed: %s\n", strerror(errno));

@@ -13,7 +13,7 @@ This project reverse engineers the ARM Mali-G77 MC9 GPU on a MediaTek Dimensity 
 
 ### SSH (primary)
 ```bash
-ssh -p 8022 u0_a659@localhost
+ssh -p 8022 u0_a375@localhost
 ```
 
 ### Root access
@@ -33,11 +33,11 @@ For a test program like `src/kbase/tests/test_foo.c`:
 
 ```bash
 # One-liner: push, compile, run
-scp -P 8022 src/kbase/tests/test_foo.c u0_a659@localhost:/data/data/com.termux/files/home/ && \
-ssh -p 8022 u0_a659@localhost "cd /data/data/com.termux/files/home && gcc -o test_foo test_foo.c && su -c ./test_foo"
+scp -P 8022 src/kbase/tests/test_foo.c u0_a375@localhost:/data/data/com.termux/files/home/ && \
+ssh -p 8022 u0_a375@localhost "cd /data/data/com.termux/files/home && gcc -o test_foo test_foo.c && su -c ./test_foo"
 
 # Check dmesg after running
-ssh -p 8022 u0_a659@localhost "su -c 'dmesg | tail -30'"
+ssh -p 8022 u0_a375@localhost "su -c 'dmesg | tail -30'"
 ```
 
 ## Static Binary Analysis
@@ -77,18 +77,18 @@ pahole binary  # shows struct definitions
 
 ### Strace GPU ioctls
 ```bash
-ssh -p 8022 u0_a659@localhost 'su -c "/data/data/com.termux/files/usr/bin/strace -f -e trace=ioctl -p PID 2>&1" | grep mali0'
+ssh -p 8022 u0_a375@localhost 'su -c "/data/data/com.termux/files/usr/bin/strace -f -e trace=ioctl -p PID 2>&1" | grep mali0'
 ```
 
 ### Strace all relevant syscalls
 ```bash
-ssh -p 8022 u0_a659@localhost 'su -c "strace -f -e trace=openat,mmap,ioctl,write -p PID" 2>&1 | head -500'
+ssh -p 8022 u0_a375@localhost 'su -c "strace -f -e trace=openat,mmap,ioctl,write -p PID" 2>&1 | head -500'
 ```
 
 ### Kernel dmesg
 ```bash
-ssh -p 8022 u0_a659@localhost "su -c 'dmesg | tail -50'"
-ssh -p 8022 u0_a659@localhost "su -c 'dmesg | grep -i mali'"
+ssh -p 8022 u0_a375@localhost "su -c 'dmesg | tail -50'"
+ssh -p 8022 u0_a375@localhost "su -c 'dmesg | grep -i mali'"
 ```
 
 ## Mali ioctl Reference

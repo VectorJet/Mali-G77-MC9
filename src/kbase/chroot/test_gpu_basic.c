@@ -57,10 +57,10 @@ int main(void) {
     if (ret < 0) { perror("VERSION_CHECK"); close(fd); return 1; }
     printf("[OK] VERSION_CHECK: %u.%u\n", ver.major, ver.minor);
 
-    uint32_t create_flags = 0;
+    uint32_t create_flags = 1; /* BASE_CONTEXT_CCTX_EMBEDDED — required for tiler jobs */
     ret = ioctl(fd, KBASE_IOCTL_SET_FLAGS, &create_flags);
     if (ret < 0) { perror("SET_FLAGS"); close(fd); return 1; }
-    printf("[OK] SET_FLAGS\n");
+    printf("[OK] SET_FLAGS (flags=0x%x)\n", create_flags);
 
     uint64_t mem[4] = {0};
     mem[0] = 2;
@@ -99,7 +99,9 @@ int main(void) {
             (unsigned long long)(gpu_va + 0x30));
 
     atom.jc = gpu_va;
-    atom.core_req = 0x203;
+    /* core_req: BASE_JD_REQ_T (bit 2) | BASE_JD_REQ_COHERENT_GROUP (bit 6) = 0x44
+     * Previously used 0x203 (compute). Now testing tiler job type 7. */
+    atom.core_req = (1 << 2) | (1 << 6); /* 0x44 - TILER */
     atom.atom_number = 1;
 
     struct { uint64_t addr; uint32_t nr, stride; } submit = {
