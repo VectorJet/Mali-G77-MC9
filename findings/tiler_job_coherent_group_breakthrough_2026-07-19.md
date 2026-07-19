@@ -155,6 +155,54 @@ Evidence:
 3. The Draw/DCD struct in v9.xml has NO tiler-related field
 4. Tiler status is controlled ENTIRELY through the MFBD Tiler pointer at `MFBD+0x38`
 
+## DCD Flags Fix (Round 1)
+
+Based on Panfrost reference and panvk Vulkan backend research, the DCD flags were updated to match what the reference driver emits for fragment shader rendering:
+
+| Bit(s) | Field | Old Value | New Value | Reference |
+|--------|-------|-----------|-----------|-----------|
+| 6 | Allow primitive reorder | **1** | **0** | Panfrost never sets this — can reorder primitives in ways incompatible with polygon list |
+| 4-5 | ZS update operation | **0** | **2** (STRONG_EARLY) | Matches Panfrost arch>=6 and Vulkan `MALI_PIXEL_KILL_STRONG_EARLY` |
+| 20 | Shader modifies coverage | **0** | **1** | Matches Panfrost arch>=6 and Vulkan path |
+| 2-3 | Pixel kill operation | 0 | **0 (still missing)** | Panfrost always sets this (WEAK_EARLY, FORCE_EARLY, or from earlyzs.kill) |
+
+**Result**: `0x58` remained unchanged — DCD flags are not the root cause.
+
+## Panfrost Vulkan Backend (panvk) Research
+
+### Tiler is ALWAYS active in Vulkan
+Unlike the GLES path where `tiler_ctx->midgard.disable` can be set, the Vulkan backend always allocates and wires a tiler context — there is no "tiler=NULL" path at all.
+
+### DCD flags in panvk (panvk_vX_cs.c:730-748)
+```c
+// All FOUR DCD flags are always set explicitly:
+cfg.properties.allow_forward_pixel_to_kill = ...     // from shader
+cfg.properties.pixel_kill_operation = earlyzs.kill;  // NEVER 0!
+cfg.properties.zs_update_operation = earlyzs.update; // NEVER 0!
+cfg.properties.allow_forward_pixel_to_be_killed = true;
+```
+
+### Critical remaining difference: `pixel_kill_operation`
+
+| Path | pixel_kill | zs_update | Source |
+|------|-------------|-----------|--------|
+| Meta clear | `WEAK_EARLY` (1) | `WEAK_EARLY` (1) | panvk_vX_meta_clear.c |
+| Meta copy | `FORCE_EARLY` (3) | `STRONG_EARLY` (2) | panvk_vX_meta_copy.c |
+| Draw | `earlyzs.kill` | `earlyzs.update` | panvk_vX_cs.c |
+
+With our shader (no depth writes, alpha=1.0, no discard path issues), the expected `pixel_kill_operation` would be `WEAK_EARLY` (1). We currently leave it at 0 (PIXEL_KILL_NONE).
+
+### All remaining DCD differences from Panfrost
+
+| Bits | Field | Our Value | Panfrost/Vulkan |
+|------|-------|-----------|-----------------|
+| 0 | Allow fwd pixel to kill | 1 | from shader |
+| 1 | Allow fwd pixel to be killed | 1 | true |
+| **2-3** | **Pixel kill operation** | **0** | **≥1 (always set)** |
+| 4-5 | ZS update operation | 2 | earlyzs.update |
+| 6 | Allow primitive reorder | 0 | not set |
+| 20 | Shader modifies coverage | 1 | true |
+
 ## Current Status
 
 | Component | Status | Event | Key Insight |
@@ -166,28 +214,26 @@ Evidence:
 | Fragment JC (tiler=active) | ❌ DATA_INVALID | 0x58 | **Fails even with valid polygon list** |
 | MFBD params[3] fix | ✅ Applied | Still 0x58 | ETS=0, RT count=1 fix didn't help |
 | MFBD/DCD/RT dumps | ✅ All correct | Still 0x58 | All fields match Panfrost reference |
-| Panfrost DCD research | ✅ No diff | Still 0x58 | DCD is same for both tiler modes |
+| Panfrost DCD research | ✅ No diff | Still 0x58 | DCD flags not root cause |
+| DCD flags fix (round 1) | ✅ Applied | Still 0x58 | Cleared prim_reorder, added zs_update, shader_cov |
+| panvk Vulkan research | ✅ Done | Still 0x58 | pixel_kill_operation still 0 (only remaining diff) |
 | Color output | None | 0 changed | No fragment output at all |
 
 ## Remaining Problem
 
-The Fragment JC gets `0x58` DATA_INVALID when the tiler pointer is SET in the MFBD, even though:
-- The TILER_JOB completed successfully (0x1 DONE)
-- The tiler wrote a valid polygon list entry (non-zero first qword)
-- MFBD params[3] is now correct (Panfrost-matched)
-- All three dumps (MFBD, DCD, RT descriptor) show correct values
-- Panfrost reference confirms DCD setup is same for both modes
+The Fragment JC gets `0x58` DATA_INVALID when the tiler pointer is SET in the MFBD. All structures have been verified correct:
+- MFBD params[3] ✅ Panfrost-matched
+- DCD flags ✅ Panfrost/Vulkan-matched (except pixel_kill_operation)
+- RT descriptor ✅ Correct format/stride/address
+- Frame Shader DCD ✅ All pointers and flags verified
 
-The issue must be in the **polygon list iteration path** — the Fragment JC reads the polygon list and tries to iterate tiles from it. The first qword `0x000b6f80000b6f90` is non-zero but may have a format issue that causes the GPU to dereference an invalid address.
-
-### Most promising lead: Fragment JC MFBD pointer bit 0
-
-The Fragment JC's MFBD pointer is `(gva + OFF_SCRATCH_MFBD) | 0x01`. Bit 0 of the MFBD address may control tile iteration mode (0=iterate all tiles, 1=follow polygon list). On this Valhall variant, the encoding might differ from Bifrost.```cpp
-*(uint64_t *)(jc + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;  // current: always bit 0 = 1
-```
+**Everything checks out against the reference.** The issue must be in the polygon list iteration path — the Fragment JC reads the polygon list entries and either:
+1. The format is incompatible (first qword `0x000b6f80000b6f90` may encode invalid tile count or pointer)
+2. The Fragment JC's MFBD pointer bit 0 may select between tile-iteration and polygon-list mode
+3. The tiler heap descriptor or tiler context has a subtle field mismatch
 
 ## Next Steps
 
-1. Try Fragment JC MFBD bit 0 = 0 (clear bit 0) — the tiler pointer at MFBD+0x38 already indicates tiler is active, so bit 0 may be redundant or inverted
-2. Dump Fragment JC header before submission to compare MFBD pointer encoding between `build_scratch_fbd()` and `build_triangle_mode()`
-3. Run with tiler=NULL but using the EXACT same MFBD to confirm the fragment pipeline works when only the tiler pointer differs
+1. Add `pixel_kill_operation=1` (bits 2-3 = WEAK_EARLY) to the DCD — the only remaining DCD difference from Panfrost
+2. Try Fragment JC MFBD pointer bit 0 = 0 — clear bit 0 in the Fragment JC's MFBD address
+3. Dump full polygon list (4096 bytes) to decode the tiler's output format

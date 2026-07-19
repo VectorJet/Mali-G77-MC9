@@ -949,7 +949,7 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
         memset(dcd, 0, 3 * 128);
 
         /* Pre Frame 0 DCD */
-        dcd[0] = (1u << 0) | (1u << 1) | (1u << 6);  /* Flags */
+        dcd[0] = (1u << 0) | (1u << 1) | (2u << 4) | (1u << 20);  /* Flags: fwd_kill, fwd_killed, zs_update=STRONG_EARLY, shader_modifies_coverage */
         dcd[1] = 0xFFFF | (0x1u << 16);               /* Sample mask + RT mask */
         dcd[6] = 0x00000000;                           /* Min Z */
         dcd[7] = 0x3F800000;                           /* Max Z */
