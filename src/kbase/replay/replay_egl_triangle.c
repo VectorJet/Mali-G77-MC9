@@ -292,7 +292,16 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
     params[0] = (fb_w - 1) | ((fb_h - 1) << 16);
     params[1] = 0;
     params[2] = (fb_w - 1) | ((fb_h - 1) << 16);
-    params[3] = (0 << 0) | (2 << 6) | (8 << 9) | (0 << 19) | (1 << 24);
+    /* Packed params for single RT, 16x16 framebuffer, RGBA8:
+     *   - Sample Count (bits 0-2) = 0
+     *   - Sample Pattern (bits 3-5) = 0
+     *   - Tie-Break Rule (bits 6-8) = 2
+     *   - Effective Tile Size (bits 9-12) = 0 (16x16 tiles)
+     *   - Render Target Count (bits 19-22) = 1
+     *   - Color Buffer Allocation (bits 24-31) = 1 (1024 bytes / 1024)
+     * Previously had Effective Tile Size = 8 and Render Target Count = 0,
+     * which caused 0x58 DATA_INVALID when tiler pointer is active. */
+    params[3] = (2 << 6) | (1 << 19) | (1 << 24);
     params[4] = (1 << 16);  /* Z Internal Format = D24 */
     /* params[5] = Z Clear (word 13) -- leave 0 */
     /* NOTE: Tiler pointer at MFBD+0x38 is intentionally LEFT NULL.
@@ -1276,6 +1285,31 @@ int main(int argc, char **argv) {
             ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
             printf("JOB_SUBMIT (atom 1: Flush) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
             drain_events(fd);
+
+            /* Dump full MFBD and Frame Shader DCD before Fragment JC submit */
+            dump_words("MFBD before Fragment JC (128 bytes)",
+                       (uint8_t *)cpu + OFF_SCRATCH_MFBD, 128);
+            dump_words("Frame Shader DCD before Fragment JC (128 bytes)",
+                       (uint8_t *)cpu + OFF_SHADER_DCD, 128);
+            dump_words("RT descriptor before Fragment JC (64 bytes)",
+                       (uint8_t *)cpu + OFF_SCRATCH_RT, 64);
+
+            /* Reinitialize Fragment JC header words 0-3 (exception status,
+             * fault pointer) that the standalone diagnostic wrote back.
+             * Also restore Type=9 and clear Next pointer so the second
+             * submit doesn't see stale exception data and fault 0x58. */
+            {
+                uint8_t *cpu_local = (uint8_t *)cpu;
+                uint32_t *frag_local = (uint32_t *)(cpu_local + OFF_TRI_FRAG_JC);
+                memset(frag_local, 0, 32);  /* Zero header words 0-7 */
+                frag_local[4] = (1u << 0) | (9u << 1);  /* Restore Type=9 (Fragment), job valid */
+                *(uint64_t *)(frag_local + 6) = 0;       /* Next = 0 (no hardware chain) */
+                /* Restore MFBD pointer at words 10-11 which was also written back.
+                 * In v9, the fragment JC's MFBD pointer is at offset 0x28 (word 10).
+                 * We saved it from the original build in build_triangle_mode → build_scratch_fbd. */
+                uint64_t mfbd_ptr = (gva + OFF_SCRATCH_MFBD) | 0x01;
+                *(uint64_t *)(frag_local + 10) = mfbd_ptr;
+            }
 
             /* Submit Atom 2: Fragment standalone */
             sub_single.addr = (uint64_t)&tri_atoms[2];
