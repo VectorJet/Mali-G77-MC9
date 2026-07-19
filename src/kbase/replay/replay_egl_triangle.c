@@ -77,15 +77,13 @@
 #define OFF_TILER_HEAP_BACKING 0x80000 /* 256 KiB backing for the tiler heap */
 #define TILER_HEAP_SIZE       0x40000 /* 256 KiB == minimum chunk size */
 
-/* Triangle mode offsets (MALLOC_VERTEX_JOB approach) */
+/* Triangle mode offsets (TILER_JOB approach — no vertex shader, uses
+ * fixed-function Vertex Array for position data + FBD for fragment shader) */
 #define OFF_TRI_POS           0xE000  /* Position buffer (3 x vec4 = 48 bytes) */
 #define OFF_TRI_BLEND         0xE040  /* Blend descriptor (16 bytes) */
 #define OFF_TRI_DEPTH         0xE060  /* Depth/stencil descriptor (32 bytes) */
 #define OFF_TRI_TLS           0xE0A0  /* TLS/Local Storage (32 bytes) */
-#define OFF_TRI_RES_TABLE     0xE0D0  /* Resource table (64 bytes, 4 entries x 16 bytes) */
-#define OFF_TRI_ATTR          0xE120  /* Attribute descriptor (32 bytes) */
-#define OFF_TRI_ATTR_BUF      0xE140  /* Attribute BUFFER descriptor (32 bytes) */
-#define OFF_TRI_VTX_JOB       0xE200  /* MALLOC_VERTEX_JOB (384 bytes, 128-align at 0xE200=113*128) */
+#define OFF_TRI_VTX_JOB       0xE200  /* TILER_JOB (256 bytes, 128-align at 0xE200=113*128) */
 #define OFF_TRI_FRAG_JC       0xE380  /* Fragment JC (128 bytes, 128-align at 0xE380) */
 
 struct base_dependency {
@@ -378,6 +376,11 @@ static const uint8_t k_valhall_green_fs[] = {
     /* BLEND.slot0.v4.f32.end @r0:r1:r2:r3, blend_descriptor_0.w0, r60, target:0x0 */
     0xf0, 0x00, 0x3c, 0x32, 0x08, 0x40, 0x7f, 0x78,
 };
+
+/* No vertex shader needed for triangle mode — we supply screen-space
+ * positions via the TILER_JOB's fixed-function Vertex Array which feeds
+ * the parameter assembler directly, bypassing the shader core.
+ * The fragment shader is provided by the FBD's Frame Shader DCD. */
 
 /* Same as k_valhall_green_fs but outputs RED (R=1,G=0,B=0,A=1).
  * Achieved by swapping the r0/r1 setup: r0 gets FADD-loaded 1.0,
@@ -790,30 +793,35 @@ static void build_shader_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint64
     dump_words("shader MFBD (post-patch)", base + OFF_SCRATCH_MFBD, 0x80);
 }
 
-/* Build a full triangle rendering pipeline using v9 MALLOC_VERTEX_JOB (type=11).
+/* Build a full triangle rendering pipeline using v9 TILER_JOB (type=7).
  *
- * MALLOC_VERTEX_JOB (384 bytes) is the v9-native vertex job format. It adds
- * Position/Varying Shader Environments at the end of the job and includes an
- * Allocation section at offset 52. The Draw/Shader Environment provides
- * the fragment shader; the Position/Varying SEs are zeroed (no vertex
- * shader needed — we supply screen-space positions via the Vertex Array).
+ * TILER_JOB (256 bytes) is the standard tiler job format shared across
+ * all Mali architectures (Midgard/Bifrost/Valhall). It includes a Draw
+ * section with Shader Environment for vertex shader binding, and the
+ * tiler context for binning.
  *
- * Memory layout of MALLOC_VERTEX_JOB (384 bytes, align 128):
- *   +0x000: Header (32B, type=11)
+ * Unlike MALLOC_VERTEX_JOB (Type 11), TILER_JOB is supported on all
+ * MTK r49 job slots — no Position/Varying Shader Environments at
+ * offsets 0x100/0x140.
+ *
+ * Memory layout of TILER_JOB (256 bytes, align 128):
+ *   +0x000: Header (32B, type=7)
  *   +0x020: Primitive (16B)
  *   +0x030: Instance Count (4B)
- *   +0x034: Allocation (4B): vertex_attribute_stride
+ *   +0x034: Vertex Count (4B)
  *   +0x038: Tiler Pointer (8B)
  *   +0x068: Scissor (8B)
  *   +0x070: Primitive Size (8B)
  *   +0x078: Indices (8B)
- *   +0x080: Draw (128B)
- *   +0x100: Position Shader Environment (64B)
- *   +0x140: Varying Shader Environment (64B)
+ *   +0x080: Draw (128B) — includes Shader Environment at offset 0xC0
+ *
+ * Attribute descriptors at OFF_TRI_ATTR/ATTR_BUF and a resource table
+ * at OFF_TRI_RES_TABLE provide LD_VAR-based vertex attribute access
+ * for the passthrough vertex shader.
  */
 static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     uint8_t *base = (uint8_t *)cpu;
-    printf("\n=== BUILD TRIANGLE MODE (MALLOC_VERTEX_JOB, type=11) ===\n");
+    printf("\n=== BUILD TRIANGLE MODE (TILER_JOB, type=7) ===\n");
     printf("framebuffer %dx%d\n", fb_w, fb_h);
 
     g_triangle_fb_w = fb_w;
@@ -822,8 +830,9 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     /* === 1. Build scratch MFBD + RT with Frame Shaders ===
      * The fragment shader is wired through the FBD's Frame Shader DCD
      * (MFBD+0x18 → DCD array with Draw struct → SHADER_PROGRAM → ISA).
-     * This is REQUIRED — the MALLOC_VERTEX_JOB's Draw Shader Environment
-     * provides only the VERTEX shader, NOT the fragment shader. */
+     * No vertex shader needed — position data from the fixed-function
+     * Vertex Array flows through the parameter assembler directly. The
+     * fragment shader is provided by the FBD's Frame Shader DCD. */
     uint64_t color_off = (fb_w * fb_h * 4 > 0x1000) ? OFF_SCRATCH_COLOR_LG : OFF_SCRATCH_COLOR;
     build_scratch_fbd(cpu, gva, fb_w, fb_h, color_off);
 
@@ -833,6 +842,25 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     *(uint64_t *)(base + OFF_SCRATCH_MFBD + 0x18) = gva + OFF_SHADER_DCD;
 
     build_tiler_context(cpu, gva, fb_w, fb_h);
+
+    /* === 1b. Build Cache Flush Job at OFF_SHADER_FLUSH_JC ===
+     * Type 3 cache flush with L2 Clean + Shader Core LS + JM + Tiler.
+     * Placed BEFORE the vertex job in the submission chain to ensure
+     * any stale cache lines are flushed before vertex+tiler writes.
+     * The flush job chains to nowhere (hardware chain disabled - we
+     * use kbase atom dependencies instead). */
+    {
+        uint32_t *fl = (uint32_t *)(base + OFF_SHADER_FLUSH_JC);
+        memset(fl, 0, 64);
+        fl[4] = (3u << 1);                  /* Type = Cache flush (3) */
+        /* Next = 0 (no hardware chain; deps via kbase atoms) */
+        fl[8]  = (1u << 0)                  /* Clean Shader Core LS */
+               | (1u << 16)                 /* Job Manager Clean */
+               | (1u << 24);                /* Tiler Clean */
+        fl[9]  = (1u << 0);                 /* L2 Clean */
+    }
+    printf("triangle: cache flush job at gpu 0x%llx\n",
+           (unsigned long long)(gva + OFF_SHADER_FLUSH_JC));
 
     /* === 2. Position buffer: 3 full-screen triangle vertices (screen-space) === */
     {
@@ -862,6 +890,10 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     sp[3] = (uint32_t)(isa_addr >> 32);
     uint64_t sp_addr = gva + OFF_SHADER_PROGRAM;
     printf("triangle: SHADER_PROGRAM at gpu 0x%llx\n", (unsigned long long)sp_addr);
+
+    /* No vertex shader — position data from fixed-function Vertex Array
+     * flows directly to the parameter assembler. Fragment shader is
+     * provided by the FBD's Frame Shader DCD. */
 
     /* === 4. Descriptors: Blend, Depth/stencil, TLS === */
     {
@@ -893,8 +925,9 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     }
     uint64_t tls_addr = gva + OFF_TRI_TLS;
 
-    memset(base + OFF_TRI_RES_TABLE, 0, 64);
-    uint64_t res_table_addr = gva + OFF_TRI_RES_TABLE;
+    /* Resource table not needed — no vertex shader means no LD_VAR
+     * attribute lookups. Position data flows through fixed-function
+     * Vertex Array in the Draw section. */
 
     /* === 4b. Frame Shader DCD at OFF_SHADER_DCD (reuse shader_fbd area) ===
      * The FBD's Frame Shader DCD pointer (MFBD+0x18) points here.
@@ -930,19 +963,37 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     printf("triangle: Frame Shader DCD at gpu 0x%llx\n",
            (unsigned long long)(gva + OFF_SHADER_DCD));
 
-    /* === 5. Build TILER_JOB (256 bytes at OFF_TRI_VTX_JOB = 0xE200) ===
-     * TILER_JOB is simpler than MALLOC_VERTEX_JOB — no Position/Varying
-     * Shader Environments that may fault when zeroed. Still has the
-     * Draw struct for the vertex shader (shader=0 = no vertex shader).
-     * The fragment shader comes from the FBD's Frame Shader DCD. */
+    /* === 5. Build MALLOC_VERTEX_JOB (384 bytes at OFF_TRI_VTX_JOB = 0xE200) ===
+     * MALLOC_VERTEX_JOB (Type 11) is the v9-native vertex job format with
+     * Position and Varying Shader Environments at offset 0x100 and 0x140.
+     * These are zeroed — no vertex shader needed since we supply
+     * screen-space positions via the Vertex Array in the Draw section.
+     * The fragment shader comes from the FBD's Frame Shader DCD.
+     *
+     * Layout from v9.xml:
+     *   0x000: Header (32B, type=11)
+     *   0x020: Primitive (16B)
+     *   0x030: Instance Count (4B)
+     *   0x034: Allocation (4B): vertex_attribute_stride
+     *   0x038: Tiler Pointer (48B) — Tiler Pointer section
+     *   0x068: Scissor (8B)
+     *   0x070: Primitive Size (8B)
+     *   0x078: Indices (8B)
+     *   0x080: Draw (128B) includes Shader Environment
+     *   0x100: Position Shader Environment (64B, zeroed = no VS)
+     *   0x140: Varying Shader Environment (64B, zeroed = no varyings)
+     */
     uint32_t *vt = (uint32_t *)(base + OFF_TRI_VTX_JOB);
     memset(vt, 0, 256);
     uint64_t tiler_ctx_addr = gva + OFF_TILER_CTX;
     uint64_t vtx_job_addr = gva + OFF_TRI_VTX_JOB;
 
-    /* 5a. Header (words 0-7): Type=7 (Tiler), 64-bit, Next=Fragment JC */
+    /* 5a. Header (words 0-7): Type=7 (Tiler), 64-bit.
+     * Next pointer is ZEROED — no hardware chain. Dependencies
+     * between vertex→flush→fragment are managed via kbase atom
+     * pre_dep fields (3-atom batch submit). */
     vt[4] = (1u << 0) | (7u << 1);
-    *(uint64_t *)(vt + 6) = gva + OFF_TRI_FRAG_JC;
+    *(uint64_t *)(vt + 6) = 0;  /* No hardware chain */
 
     /* 5b. Primitive (words 8-11, offset 0x20) */
     vt[8]    = (8u << 0)  | (1u << 15) | (1u << 16) | (1u << 17);
@@ -953,8 +1004,9 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     /* 5c. Instance Count (word 12, offset 0x30) */
     vt[12] = 1;
 
-    /* 5d. Vertex Count (word 13, offset 0x34) — TILER_JOB only */
-    vt[13] = 3;
+    /* 5d. Vertex Count (word 13, offset 0x34) — TILER_JOB replaces
+     * the MALLOC_VERTEX_JOB Allocation field with Vertex Count (Type 7). */
+    vt[13] = 3;  /* 3 vertices */
 
     /* 5e. Tiler Pointer (words 14-15, offset 0x38) */
     *(uint64_t *)(vt + 14) = tiler_ctx_addr;
@@ -991,21 +1043,28 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     }
     *(uint64_t *)(dw + 14) = 0;  /* Occlusion = 0 */
 
-    /* Shader Environment (words 16-31) — vertex shader: shader=0 */
-    uint32_t *se = dw + 16;
-    se[0] = 0;  /* Attribute offset */
-    se[1] = 0;  /* FAU count */
-    *(uint64_t *)(se + 8)  = 0 | 0ULL;  /* Resources = 0 */
-    *(uint64_t *)(se + 10) = 0;          /* Shader = 0 (no VS) */
-    *(uint64_t *)(se + 12) = 0;          /* Thread storage = 0 */
-    *(uint64_t *)(se + 14) = 0;          /* FAU = 0 */
+    /* Shader Environment (words 16-31) — NO vertex shader.
+     * For TILER_JOB, the Draw's fixed-function Vertex Array provides
+     * position data directly through the parameter assembler. Setting
+     * Shader=0 tells the GPU to skip vertex processing and use the
+     * Vertex Array as-is. */
+    {
+        uint32_t *se = dw + 16;
+        se[0] = 0;                    /* Attribute offset = 0 */
+        se[1] = 0;                    /* FAU count = 0 */
+        *(uint64_t *)(se + 8)  = 0;   /* Resources = 0 (no resource table) */
+        *(uint64_t *)(se + 10) = 0;   /* Shader = 0 (no vertex shader) */
+        *(uint64_t *)(se + 12) = 0;   /* Thread storage = 0 */
+        *(uint64_t *)(se + 14) = 0;   /* FAU = 0 */
+        printf("triangle: No vertex shader - using fixed-function Vertex Array\n");
+    }
 
-    printf("triangle: TILER_JOB at gpu 0x%llx\n", (unsigned long long)vtx_job_addr);
-    dump_words("TJ header+prim+counts", base + OFF_TRI_VTX_JOB, 64);
-    dump_words("TJ scissor+size+indices", base + OFF_TRI_VTX_JOB + 0x68, 24);
-    dump_words("TJ Draw (DCD)", base + OFF_TRI_VTX_JOB + 0x80, 128);
+    printf("triangle: TILER_JOB at gpu 0x%llx (type=7, no VS)\n", (unsigned long long)vtx_job_addr);
+    dump_words("TJ full (256 bytes)", base + OFF_TRI_VTX_JOB, 256);
 
-    /* === 6. Fragment Job (128 bytes at OFF_TRI_FRAG_JC = 0xE380) === */
+    /* === 6. Fragment Job (128 bytes at OFF_TRI_FRAG_JC = 0xE380) ===
+     * Next pointer is ZEROED — no hardware chain. Will be submitted
+     * as a separate kbase atom with dependency on the cache flush. */
     uint32_t *fj = (uint32_t *)(base + OFF_TRI_FRAG_JC);
     memset(fj, 0, 128);
     fj[4] = (1u << 0) | (9u << 1);
@@ -1014,6 +1073,7 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;
     *(uint64_t *)(fj + 12) = 0;
     fj[14] = 0;
+    /* Next = 0 (already zeroed by memset) */
 
     printf("triangle: Fragment JC at gpu 0x%llx\n", (unsigned long long)(gva + OFF_TRI_FRAG_JC));
     dump_words("triangle Fragment JC", base + OFF_TRI_FRAG_JC, 64);
@@ -1137,73 +1197,90 @@ int main(int argc, char **argv) {
         }
 
         if (is_triangle_mode) {
-            /* Diagnostic: Try the Fragment JC standalone, WITHOUT tiler
-             * context. Temporarily zero MFBD+0x38 so the fragment job
-             * falls back to tile iteration over all tiles.
-             * Build_tiler_context() already patched it, so save & restore. */
-            uint8_t *mfbd_reg = (uint8_t *)cpu + OFF_SCRATCH_MFBD;
-            uint64_t saved_tiler_ptr = *(uint64_t *)(mfbd_reg + 0x38);
-            *(uint64_t *)(mfbd_reg + 0x38) = 0;  /* Tiler = NULL → iterate all tiles */
 
-            struct kbase_atom_mtk frag_only_atom;
-            memset(&frag_only_atom, 0, sizeof(frag_only_atom));
-            frag_only_atom.jc = gva + OFF_TRI_FRAG_JC;
-            frag_only_atom.atom_number = 1;
-            frag_only_atom.core_req = 0x001;
+    /* Now submit the full triangle chain as 3 atoms:
+     *   Atom 0: TILER_JOB (Type 7) — vertex+tiler processing
+     *   Atom 1: Cache Flush (Type 3)
+     *   Atom 2: Fragment (Type 9)
+     *
+     * Dependencies:
+     *   Atom 1 depends on Atom 0 (dep_type=1 = data)
+     *   Atom 2 depends on Atom 1 (dep_type=1 = data)
+     *
+     * Atom 0 uses core_req=0x04E — Chrome's exact captured atom config:
+     *   PROTECTED_MODE_SWITCH (bit 1) | TILER (bit 2) | CS (bit 3) | COHERENT_GROUP (bit 6)
+     *   = 0x02 | 0x04 | 0x08 | 0x40 = 0x4E
+     *
+     * Stride = sizeof(struct kbase_atom_mtk) = packed 72 bytes
+     */
+            #define TRI_NR_ATOMS 3
+            struct kbase_atom_mtk tri_atoms[TRI_NR_ATOMS];
+            memset(tri_atoms, 0, sizeof(tri_atoms));
 
-            struct kbase_ioctl_job_submit sub_diag = {0};
-            sub_diag.addr = (uint64_t)&frag_only_atom;
-            sub_diag.nr_atoms = 1;
-            sub_diag.stride = sizeof(struct kbase_atom_mtk);
-            int ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_diag);
-            printf("JOB_SUBMIT (frag_only_diag, no tiler) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
-            drain_events(fd);
+            /* Atom 0: TILER_JOB (vertex+tiler processing) */
+            tri_atoms[0].jc = gva + OFF_TRI_VTX_JOB;
+            tri_atoms[0].atom_number = 0;
+            tri_atoms[0].core_req = 0x04E;  /* Chrome-matching: PROTECTED | TILER | CS | COHERENT */
+            /* No pre-dep — first in chain */
 
-            /* Restore Tiler pointer for the full chain.
-             * The MALLOC_VERTEX_JOB's tiler step will populate the
-             * polygon list at 0x7000, then the Fragment JC reads it. */
-            *(uint64_t *)(mfbd_reg + 0x38) = saved_tiler_ptr;
+            /* Atom 1: Cache Flush Job */
+            tri_atoms[1].jc = gva + OFF_SHADER_FLUSH_JC;
+            tri_atoms[1].atom_number = 1;
+            tri_atoms[1].core_req = 0x002;  /* CS slot — cache flush runs on compute cores */
+            tri_atoms[1].pre_dep[0].atom_id = 0;
+            tri_atoms[1].pre_dep[0].dep_type = 0;  /* No dep — sequential submission enforces ordering */
 
-            /* Diagnostic: Submit TILER_JOB standalone (no Next pointer,
-             * no chain) to see if the tiler itself works. */
+            /* Atom 2: Fragment Job */
+            tri_atoms[2].jc = gva + OFF_TRI_FRAG_JC;
+            tri_atoms[2].atom_number = 2;
+            tri_atoms[2].core_req = 0x04E;  /* PROTECTED | TILER | CS | COHERENT — needs access to tiler poly list */
+            tri_atoms[2].pre_dep[0].atom_id = 0;
+            tri_atoms[2].pre_dep[0].dep_type = 0;  /* No dep — sequential submission enforces ordering */
+
+            printf("triangle: submitting 3-atom chain: Vertex→Flush→Fragment\n");
+            struct kbase_ioctl_job_submit sub_single = {0};
+            sub_single.nr_atoms = 1;
+            sub_single.stride = sizeof(struct kbase_atom_mtk);
+
+            int ret = 0;
+
+            /* Reinitialize TILER_JOB header words 0-7 (exception status,
+             * fault pointer, type, next) that the GPU wrote back during
+             * the tiler-only diagnostic. Without this, the second
+             * submit sees stale exception data and faults DATA_INVALID. */
             {
-                /* Temporarily zero the Next pointer so the tiler job
-                 * terminates immediately after binning */
-                uint8_t *vj = (uint8_t *)cpu + OFF_TRI_VTX_JOB;
-                uint64_t saved_next = *(uint64_t *)(vj + 0x18);
-                *(uint64_t *)(vj + 0x18) = 0;
-
-                struct kbase_atom_mtk tiler_only_atom;
-                memset(&tiler_only_atom, 0, sizeof(tiler_only_atom));
-                tiler_only_atom.jc = gva + OFF_TRI_VTX_JOB;
-                tiler_only_atom.atom_number = 1;
-                tiler_only_atom.core_req = 0x001;
-
-                struct kbase_ioctl_job_submit sub_tiler = {0};
-                sub_tiler.addr = (uint64_t)&tiler_only_atom;
-                sub_tiler.nr_atoms = 1;
-                sub_tiler.stride = sizeof(struct kbase_atom_mtk);
-                int ret_tiler = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_tiler);
-                printf("JOB_SUBMIT (tiler_only) ret=%d errno=%d (%s)\n", ret_tiler, errno, strerror(errno));
-                drain_events(fd);
-
-                /* Restore Next pointer */
-                *(uint64_t *)(vj + 0x18) = saved_next;
+                uint8_t *cpu_local = (uint8_t *)cpu;
+                uint32_t *vt_local = (uint32_t *)(cpu_local + OFF_TRI_VTX_JOB);
+                memset(vt_local, 0, 32);
+                vt_local[4] = (1u << 0) | (7u << 1);  /* Restore Type=7, job valid */
+                *(uint64_t *)(vt_local + 6) = 0;       /* Next = 0 (no hardware chain) */
             }
 
-            /* Now submit the full triangle chain */
-            struct kbase_atom_mtk tri_atom;
-            memset(&tri_atom, 0, sizeof(tri_atom));
-            tri_atom.jc = gva + OFF_TRI_VTX_JOB;
-            tri_atom.atom_number = 1;
-            tri_atom.core_req = 0x001;
+            /* Zero polygon list before TILER_JOB — ensures tiler writes to a clean buffer,
+             * free from any stale data left by the diagnostic tiler-only run. */
+            memset((uint8_t *)cpu + OFF_SCRATCH_POLYLIST, 0, 4096);
 
-            struct kbase_ioctl_job_submit sub = {0};
-            sub.addr = (uint64_t)&tri_atom;
-            sub.nr_atoms = 1;
-            sub.stride = sizeof(struct kbase_atom_mtk);
-            ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub);
-            printf("JOB_SUBMIT (triangle) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+            /* Submit Atom 0: TILER_JOB standalone */
+            sub_single.addr = (uint64_t)&tri_atoms[0];
+            ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
+            printf("JOB_SUBMIT (atom 0: TILER) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+            drain_events(fd);
+
+            /* Dump the polygon list produced by the TILER_JOB to verify it wrote valid binned output.
+             * If the poly list is empty (all zeros), the fixed-function Vertex Array isn't feeding
+             * position data correctly without a vertex shader. */
+            dump_words("polygon list after TILER_JOB (256 bytes)", (uint8_t *)cpu + OFF_SCRATCH_POLYLIST, 256);
+
+            /* Submit Atom 1: Cache Flush standalone — ensures tiler's polygon list writeback is visible to Fragment */
+            sub_single.addr = (uint64_t)&tri_atoms[1];
+            ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
+            printf("JOB_SUBMIT (atom 1: Flush) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
+            drain_events(fd);
+
+            /* Submit Atom 2: Fragment standalone */
+            sub_single.addr = (uint64_t)&tri_atoms[2];
+            ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
+            printf("JOB_SUBMIT (atom 2: Fragment) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
             drain_events(fd);
 
             /* Check color buffer for shader output */
