@@ -301,7 +301,7 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
      *   - Color Buffer Allocation (bits 24-31) = 1 (1024 bytes / 1024)
      * Previously had Effective Tile Size = 8 and Render Target Count = 0,
      * which caused 0x58 DATA_INVALID when tiler pointer is active. */
-    params[3] = (2 << 6) | (1 << 19) | (1 << 24);
+    params[3] = (2 << 6) | (0 << 19) | (1 << 24);
     params[4] = (1 << 16);  /* Z Internal Format = D24 */
     /* params[5] = Z Clear (word 13) -- leave 0 */
     /* NOTE: Tiler pointer at MFBD+0x38 is intentionally LEFT NULL.
@@ -339,7 +339,13 @@ static void build_scratch_fbd(void *cpu, uint64_t gva, int fb_w, int fb_h, uint6
     jc[4] = (1 << 0) | (9 << 1);
     jc[8] = 0;
     jc[9] = ((fb_w / 16) - 1) | (((fb_h / 16) - 1) << 16);
-    *(uint64_t *)(jc + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;
+    /* NOTE: Bit 0 of the MFBD pointer may control tile iteration mode.
+     * Bit 0=0 → iterate all tiles directly (like tiler=NULL mode).
+     * Bit 0=1 → follow polygon list from tiler context.
+     * With tiler=active, clearing bit 0 forces tile-iteration to bypass
+     * the polygon list, which avoids the 0x58 DATA_INVALID fault if the
+     * polygon list format is incompatible. */
+    *(uint64_t *)(jc + 10) = (gva + OFF_SCRATCH_MFBD) | 0x00;
 
     printf("scratch_fbd: %dx%d MFBD at gpu 0x%llx\n", fb_w, fb_h, (unsigned long long)(gva + OFF_SCRATCH_MFBD));
     printf("scratch_fbd: color buf at gpu 0x%llx (%d bytes)\n", (unsigned long long)(gva + color_off), fb_w * fb_h * 4);
@@ -478,7 +484,10 @@ static void build_tiler_context(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     *(uint64_t *)(tc + 0) = gva + OFF_SCRATCH_POLYLIST;
     tc[2] = (1u << 0)        /* Hierarchy Mask = 1 (smallest level) */
           | (0u << 13);      /* Sample Pattern = Single-sampled (0) */
-    tc[3] = (uint32_t)((fb_w - 1) | ((fb_h - 1) << 16));
+    /* FB Width/Height: use raw pixel dimensions, NOT max-index (panfrost v9 genxml
+     * uses FB Width/FB Height, not Width-1/Height-1 as in MFBD params).
+     * Previously used (fb_w-1)|((fb_h-1)<<16) which encoded 15x15 for a 16x16 fb. */
+    tc[3] = (uint32_t)(fb_w | (fb_h << 16));
     tc[4] = 0;               /* Layer count-1 = 0 (single layer) */
     /* word 5 = padding */
     *(uint64_t *)(tc + 6) = gva + OFF_TILER_HEAP_DESC;
@@ -949,7 +958,7 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
         memset(dcd, 0, 3 * 128);
 
         /* Pre Frame 0 DCD */
-        dcd[0] = (1u << 0) | (1u << 1) | (2u << 4) | (1u << 20);  /* Flags: fwd_kill, fwd_killed, zs_update=STRONG_EARLY, shader_modifies_coverage */
+        dcd[0] = (1u << 0) | (1u << 1) | (1u << 2) | (2u << 4) | (1u << 20);  /* Flags: fwd_kill, fwd_killed, pixel_kill=WEAK_EARLY, zs_update=STRONG_EARLY, shader_cov */
         dcd[1] = 0xFFFF | (0x1u << 16);               /* Sample mask + RT mask */
         dcd[6] = 0x00000000;                           /* Min Z */
         dcd[7] = 0x3F800000;                           /* Max Z */
@@ -1004,11 +1013,15 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     vt[4] = (1u << 0) | (7u << 1);
     *(uint64_t *)(vt + 6) = 0;  /* No hardware chain */
 
-    /* 5b. Primitive (words 8-11, offset 0x20) */
-    vt[8]    = (8u << 0)  | (1u << 15) | (1u << 16) | (1u << 17);
-    vt[9]    = 0;       /* Base vertex offset */
-    vt[10]   = 0;       /* Instance offset */
-    vt[11]   = 3;       /* Index count = 3 */
+    /* 5b. Primitive (words 8-11, offset 0x20)
+     * Draw mode = Triangles (8). No index buffer — non-indexed draw.
+     * Bit 15 was previously set (Index Type = U32) but index buffer at 0x78
+     * was null, causing DATA_INVALID when GPU tried to fetch indices from VA 0.
+     * Clear index type bits and set vertex count only. */
+    vt[8]    = (8u << 0);  /* Draw mode = Triangles, Index Type = None */
+    vt[9]    = 0;          /* Base vertex offset */
+    vt[10]   = 0;          /* Instance offset */
+    vt[11]   = 0;          /* Index count = 0 (non-indexed) */
 
     /* 5c. Instance Count (word 12, offset 0x30) */
     vt[12] = 1;
@@ -1034,12 +1047,19 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     uint32_t *dw = vt + 32;
     dw[0] = (1u << 0) | (1u << 1) | (1u << 6);
     dw[1] = 0xFFFF | (0x1u << 16);
-    /* Vertex Array */
+    /* Vertex Array (non-packet mode — no vertex shader, fixed-function path)
+     * v9 genxml Vertex Array struct (3 words / 12 bytes):
+     *   word 0 bits 31:6: Pointer[25:0] (address shr 6), bit 0 = Packet (0=disabled)
+     *   word 1 bits 31:0: Pointer[57:26]
+     *   word 2 bits 31:16: Vertex attribute stride (bytes per vertex)
+     * Packet=0: GPU reads raw vertex data directly at pos_addr.
+     * NOTE: Packet=1 caused DATA_INVALID on TILER_JOB — packet mode requires
+     * a live vertex shader + packet stream; without one it faults immediately. */
     {
         uint64_t V = pos_addr >> 6;
-        dw[2] = (uint32_t)((V & 0x03FFFFFFu)) << 6;
-        dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu);
-        dw[4] = (16u << 16);
+        dw[2] = (uint32_t)((V & 0x03FFFFFFu) << 6); /* Pointer bits 25:0, Packet=0 */
+        dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu); /* Pointer bits 57:26 */
+        dw[4] = (16u << 16);                          /* Vertex attribute stride = 16 (vec4) */
     }
     dw[6] = 0x00000000;  /* Min Z */
     dw[7] = 0x3F800000;  /* Max Z */
@@ -1079,7 +1099,7 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     fj[4] = (1u << 0) | (9u << 1);
     fj[8] = 0;
     fj[9] = ((fb_w / 16) - 1) | (((fb_h / 16) - 1) << 16);
-    *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;
+    *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01;  /* Bit 0 = 1: follow polygon list through tiler context */
     *(uint64_t *)(fj + 12) = 0;
     fj[14] = 0;
     /* Next = 0 (already zeroed by memset) */
@@ -1164,8 +1184,17 @@ int main(int argc, char **argv) {
 
     struct page_asset pages[sizeof(k_page_assets) / sizeof(k_page_assets[0])];
     memcpy(pages, k_page_assets, sizeof(k_page_assets));
-    if (load_assets(asset_dir, cpu, gva, pages, sizeof(pages) / sizeof(pages[0])) != 0) {
-        return 1;
+
+    /* Skip asset loading for self-contained modes that don't need captured binaries */
+    int needs_assets = !(strncmp(mode, "shader_fbd", 10) == 0
+                         || strncmp(mode, "scratch_fbd", 11) == 0
+                         || strcmp(mode, "triangle") == 0
+                         || strcmp(mode, "triangle_64") == 0
+                         || strcmp(mode, "triangle_256") == 0);
+    if (needs_assets) {
+        if (load_assets(asset_dir, cpu, gva, pages, sizeof(pages) / sizeof(pages[0])) != 0) {
+            return 1;
+        }
     }
     uint8_t *baseline = malloc((sizeof(pages) / sizeof(pages[0])) * PAGE_SIZE);
     if (!baseline) {
@@ -1177,7 +1206,7 @@ int main(int argc, char **argv) {
     struct kbase_atom_mtk atoms[4];
     char atoms_path[512];
     path_join(atoms_path, sizeof(atoms_path), asset_dir, "001_atoms_raw.bin");
-    if (read_file(atoms_path, atoms, sizeof(atoms)) != 0) {
+    if (needs_assets && read_file(atoms_path, atoms, sizeof(atoms)) != 0) {
         fprintf(stderr, "Failed to read %s\n", atoms_path);
         return 1;
     }
@@ -1278,7 +1307,60 @@ int main(int argc, char **argv) {
             /* Dump the polygon list produced by the TILER_JOB to verify it wrote valid binned output.
              * If the poly list is empty (all zeros), the fixed-function Vertex Array isn't feeding
              * position data correctly without a vertex shader. */
-            dump_words("polygon list after TILER_JOB (256 bytes)", (uint8_t *)cpu + OFF_SCRATCH_POLYLIST, 256);
+            dump_words("polygon list after TILER_JOB (4096 bytes)", (uint8_t *)cpu + OFF_SCRATCH_POLYLIST, 4096);
+            /* Decode polygon list header to find where primitive data is stored */
+            {
+                uint64_t poly_hdr = *(uint64_t *)((uint8_t *)cpu + OFF_SCRATCH_POLYLIST);
+                uint32_t start_off = (uint32_t)(poly_hdr >> 32);
+                uint32_t end_off = (uint32_t)(poly_hdr & 0xFFFFFFFFULL);
+                printf("poly list header decode: start=0x%x end=0x%x diff=%d\n",
+                       start_off, end_off, end_off - start_off);
+                /* Try as GPU address (SAME_VA): is it within our mapping? */
+                uint64_t alloc_base = (uint64_t)cpu;
+                uint64_t alloc_end = alloc_base + total_pages * PAGE_SIZE;
+                if (start_off >= alloc_base && start_off < alloc_end) {
+                    uint64_t cpu_offset = start_off - alloc_base;
+                    printf("poly list header start is GPU addr, offset=0x%llx\n",
+                           (unsigned long long)cpu_offset);
+                    dump_words("primitive data at GPU address (64 bytes)",
+                               (uint8_t *)cpu + cpu_offset, 64);
+                } else if (start_off < total_pages * PAGE_SIZE) {
+                    printf("poly list header start is raw offset 0x%x\n", start_off);
+                    dump_words("primitive data at raw offset (64 bytes)",
+                               (uint8_t *)cpu + start_off, 64);
+                } else {
+                    /* Try as relative to gva */
+                    uint64_t rel = start_off - gva;
+                    if (rel < total_pages * PAGE_SIZE) {
+                        printf("poly list header start = gva + 0x%llx\n",
+                               (unsigned long long)rel);
+                        dump_words("primitive data at gva+offset (64 bytes)",
+                                   (uint8_t *)cpu + rel, 64);
+                    } else {
+                        printf("poly list header start=0x%x: no valid decode (gva=0x%llx)\n",
+                               start_off, (unsigned long long)gva);
+                        /* Scan tiler heap for any non-zero data */
+                        uint8_t *hp = (uint8_t *)cpu + OFF_TILER_HEAP_BACKING;
+                        int found = 0;
+                        for (int ii = 0; ii < TILER_HEAP_SIZE; ii += 8) {
+                            uint64_t v = *(uint64_t *)(hp + ii);
+                            if (v) {
+                                if (!found) printf("tiler heap non-zero:\n");
+                                printf("  0x%05x: 0x%016llx\n", ii, (unsigned long long)v);
+                                found++;
+                                if (found >= 12) { printf("  ... (more)\n"); break; }
+                            }
+                        }
+                        if (!found) printf("tiler heap: all zeros (%d KiB)\n", TILER_HEAP_SIZE / 1024);
+                    }
+                }
+            }
+            dump_words("primitive data candidate at +0x1F80 (32 bytes)",
+                       (uint8_t *)cpu + 0x1F80, 32);
+            /* Dump first 256 bytes of tiler heap to check if primitive data
+             * was stored there instead of at offset 0x1F80 */
+            dump_words("tiler heap first 256 bytes",
+                       (uint8_t *)cpu + OFF_TILER_HEAP_BACKING, 256);
 
             /* Submit Atom 1: Cache Flush standalone — ensures tiler's polygon list writeback is visible to Fragment */
             sub_single.addr = (uint64_t)&tri_atoms[1];
@@ -1286,13 +1368,17 @@ int main(int argc, char **argv) {
             printf("JOB_SUBMIT (atom 1: Flush) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
             drain_events(fd);
 
-            /* Dump full MFBD and Frame Shader DCD before Fragment JC submit */
+            /* Dump full MFBD, Frame Shader DCD, RT, tiler ctx, and heap desc */
             dump_words("MFBD before Fragment JC (128 bytes)",
                        (uint8_t *)cpu + OFF_SCRATCH_MFBD, 128);
             dump_words("Frame Shader DCD before Fragment JC (128 bytes)",
                        (uint8_t *)cpu + OFF_SHADER_DCD, 128);
             dump_words("RT descriptor before Fragment JC (64 bytes)",
                        (uint8_t *)cpu + OFF_SCRATCH_RT, 64);
+            dump_words("Tiler Context before Fragment JC (192 bytes)",
+                       (uint8_t *)cpu + OFF_TILER_CTX, 192);
+            dump_words("Tiler Heap Desc before Fragment JC (32 bytes)",
+                       (uint8_t *)cpu + OFF_TILER_HEAP_DESC, 32);
 
             /* Reinitialize Fragment JC header words 0-3 (exception status,
              * fault pointer) that the standalone diagnostic wrote back.
@@ -1307,7 +1393,7 @@ int main(int argc, char **argv) {
                 /* Restore MFBD pointer at words 10-11 which was also written back.
                  * In v9, the fragment JC's MFBD pointer is at offset 0x28 (word 10).
                  * We saved it from the original build in build_triangle_mode → build_scratch_fbd. */
-                uint64_t mfbd_ptr = (gva + OFF_SCRATCH_MFBD) | 0x01;
+                uint64_t mfbd_ptr = (gva + OFF_SCRATCH_MFBD) | 0x00;  /* Bit 0 = 0 */
                 *(uint64_t *)(frag_local + 10) = mfbd_ptr;
             }
 
