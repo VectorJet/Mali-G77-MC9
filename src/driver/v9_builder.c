@@ -264,16 +264,28 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     fj[4] = (0u << 0) | (9u << 1);  /* job_descriptor_size=0, job_type=9 */
     *(uint64_t *)(fj + 10) = fb->mfbd_gva | 0x01u;
 
-    /* Dump MFBD and Fragment JC for debugging */
-    printf("DEBUG: MFBD word 0-15:\n");
-    uint64_t *mfbd64 = (uint64_t *)(base_cpu + 0x6000);
-    for (int i = 0; i < 16; i += 2) {
-        printf("  +0x%02x: 0x%016llx  0x%016llx\n", i * 8, (unsigned long long)mfbd64[i], (unsigned long long)mfbd64[i+1]);
-    }
-    printf("DEBUG: Fragment JC word 0-7:\n");
-    uint64_t *fj64 = (uint64_t *)(base_cpu + 0xE380);
-    for (int i = 0; i < 8; i += 2) {
-        printf("  +0x%02x: 0x%016llx  0x%016llx\n", i * 8, (unsigned long long)fj64[i], (unsigned long long)fj64[i+1]);
+    /* Dump all key structures for offline comparison */
+    {
+        const uint8_t *b = base_cpu;
+#define DUMP_BLOCK(label, off, words) do { \
+    printf("DEBUG: " label " at 0x%04x (%u words):\n", (unsigned)(off), (unsigned)(words)); \
+    const uint64_t *p = (const uint64_t *)(b + (off)); \
+    for (unsigned _i = 0; _i < (words); _i += 2) { \
+        printf("  +0x%02x: 0x%016llx  0x%016llx\n", _i * 8, \
+               (unsigned long long)p[_i], (unsigned long long)p[_i+1]); \
+    } \
+} while(0)
+        DUMP_BLOCK("MFBD",            0x6000, 16);
+        DUMP_BLOCK("RT0",             0x6080, 8);
+        DUMP_BLOCK("DCD (pre0)",      0xC100, 16);
+        DUMP_BLOCK("SHADER_PROGRAM",  0xCC00, 4);
+        DUMP_BLOCK("Tiler Heap Desc", 0xD500, 4);
+        DUMP_BLOCK("Tiler Context",   0xD600, 24);
+        DUMP_BLOCK("Blend",           0xE040, 2);
+        DUMP_BLOCK("Depth/Stencil",   0xE060, 4);
+        DUMP_BLOCK("TLS",             0xE0A0, 4);
+        DUMP_BLOCK("Fragment JC",     0xE380, 8);
+#undef DUMP_BLOCK
     }
 
     ret = kbase_submit_job(dev, fb->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2);
