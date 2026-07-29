@@ -239,8 +239,9 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     if (ret < 0) return ret;
     uint32_t atom_nr = 0, event_code = 0;
     kbase_wait_event(dev, &atom_nr, &event_code);
+    printf("v9_render_triangle: Atom 0 (TILER) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
     if (event_code != 0x1) {
-        fprintf(stderr, "v9_render_triangle: Atom 0 (TILER) failed event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
+        fprintf(stderr, "v9_render_triangle: Atom 0 (TILER) failed!\n");
         return -EIO;
     }
 
@@ -248,8 +249,9 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
+    printf("v9_render_triangle: Atom 1 (Pre-Flush) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
     if (event_code != 0x1) {
-        fprintf(stderr, "v9_render_triangle: Atom 1 (Pre-Flush) failed event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
+        fprintf(stderr, "v9_render_triangle: Atom 1 (Pre-Flush) failed!\n");
         return -EIO;
     }
 
@@ -278,8 +280,9 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     ret = kbase_submit_job(dev, fb->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
+    printf("v9_render_triangle: Atom 2 (Fragment) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
     if (event_code != 0x1) {
-        fprintf(stderr, "v9_render_triangle: Atom 2 (Fragment) failed event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
+        fprintf(stderr, "v9_render_triangle: Atom 2 (Fragment) failed!\n");
         return -EIO;
     }
 
@@ -292,8 +295,9 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 3);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
+    printf("v9_render_triangle: Atom 3 (Post-Flush) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
     if (event_code != 0x1) {
-        fprintf(stderr, "v9_render_triangle: Atom 3 (Post-Flush) failed event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
+        fprintf(stderr, "v9_render_triangle: Atom 3 (Post-Flush) failed!\n");
         return -EIO;
     }
 
