@@ -382,7 +382,17 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     kbase_wait_event(dev, &atom_nr, &event_code);
     printf("v9_render_triangle: Atom 2 (Fragment) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
     if (event_code != 0x1) {
-        fprintf(stderr, "v9_render_triangle: Atom 2 (Fragment) failed!\n");
+        fprintf(stderr, "v9_render_triangle: Atom 2 (Fragment) failed with 0x%x!\n", event_code);
+        printf("=== DMESG (kernel logs after Fragment JC failure) ===\n");
+        FILE *dmesg_f = popen("dmesg | tail -40", "r");
+        if (dmesg_f) {
+            char dmesg_buf[256];
+            while (fgets(dmesg_buf, sizeof(dmesg_buf), dmesg_f)) {
+                printf("DMESG: %s", dmesg_buf);
+            }
+            pclose(dmesg_f);
+        }
+        printf("=== END DMESG ===\n");
         return -EIO;
     }
 
