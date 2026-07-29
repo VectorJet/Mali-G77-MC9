@@ -243,7 +243,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     /* 1. Submit Atom 0: TILER_JOB */
     printf("v9_render_triangle: submitting Atom 0 (jc=0x%llx, core_req=0x%x)\n",
            (unsigned long long)fb->tiler_job_gpu, KBASE_QUEUE_REQ_TILER);
-    int ret = kbase_submit_job(dev, fb->tiler_job_gpu, KBASE_QUEUE_REQ_TILER, 0);
+    int ret = kbase_submit_job(dev, fb->tiler_job_gpu, KBASE_QUEUE_REQ_TILER, 0, 0, 0);
     if (ret < 0) return ret;
     uint32_t atom_nr = 0, event_code = 0;
     kbase_wait_event(dev, &atom_nr, &event_code);
@@ -254,7 +254,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     }
 
     /* 2. Submit Atom 1: Pre-Flush */
-    ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1);
+    ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1, 0, 0);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
     printf("v9_render_triangle: Atom 1 (Pre-Flush) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
@@ -377,7 +377,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
 #undef CHECK_PTR
     }
 
-    ret = kbase_submit_job(dev, fb->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2);
+    ret = kbase_submit_job(dev, fb->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2, 0, 1);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
     printf("v9_render_triangle: Atom 2 (Fragment) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);
@@ -392,7 +392,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     fl[4] = (3u << 1);
     fl[8] = 0xFFFFFFFFu; fl[9] = 0xFFFFFFFFu;
 
-    ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 3);
+    ret = kbase_submit_job(dev, fb->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 3, 0, 0);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
     printf("v9_render_triangle: Atom 3 (Post-Flush) event_code=0x%x atom_nr=%u\n", event_code, atom_nr);

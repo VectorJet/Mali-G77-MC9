@@ -42,7 +42,8 @@ void kbase_dev_close(struct kbase_dev *dev);
 struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t flags);
 void kbase_bo_free(struct kbase_bo *bo);
 
-int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr);
+int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr,
+                      uint8_t jobslot, uint32_t frame_nr);
 int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_code);
 
 #ifdef __cplusplus

@@ -176,7 +176,8 @@ void kbase_bo_free(struct kbase_bo *bo) {
     free(bo);
 }
 
-int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr) {
+int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr,
+                      uint8_t jobslot, uint32_t frame_nr) {
     if (!dev || !jc) return -EINVAL;
 
     struct kbase_atom_mtk atom;
@@ -184,6 +185,8 @@ int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint
     atom.jc = jc;
     atom.atom_number = (uint8_t)atom_nr;
     atom.core_req = core_req;
+    atom.jobslot = jobslot;
+    atom.frame_nr = frame_nr;
 
     struct kbase_ioctl_job_submit submit = {
         .addr = (uint64_t)&atom,

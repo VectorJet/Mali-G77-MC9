@@ -41,7 +41,7 @@ int main(void) {
     fl[8] = 0xFFFFFFFFu;      /* Clean core caches */
     fl[9] = 0xFFFFFFFFu;      /* Clean L2 caches */
 
-    int ret = kbase_submit_job(dev, rw_bo->gpu, KBASE_QUEUE_REQ_FLUSH, 1);
+    int ret = kbase_submit_job(dev, rw_bo->gpu, KBASE_QUEUE_REQ_FLUSH, 1, 0, 0);
     if (ret < 0) {
         fprintf(stderr, "FAIL: kbase_submit_job failed (ret=%d)\n", ret);
         kbase_bo_free(exec_bo);
