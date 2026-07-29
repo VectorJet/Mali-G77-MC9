@@ -114,6 +114,14 @@ struct v9_framebuffer *v9_framebuffer_create(struct kbase_dev *dev, uint32_t wid
     *(uint64_t *)(th + 2) = fb->tiler_heap_backing_gpu;
     *(uint64_t *)(th + 4) = fb->tiler_heap_backing_gpu;
     *(uint64_t *)(th + 6) = fb->tiler_heap_backing_gpu + 0x40000;
+    {
+        uint64_t actual_top = *(uint64_t *)(th + 6);
+        uint64_t expected_top = fb->tiler_heap_backing_gpu + 0x40000;
+        printf("v9_framebuffer_create: th[6..7]=0x%016llx (expected 0x%016llx) %s\n",
+               (unsigned long long)actual_top,
+               (unsigned long long)expected_top,
+               actual_top == expected_top ? "OK" : "MISMATCH");
+    }
 
     /* Initialize TILER_CONTEXT struct */
     uint32_t *tc = (uint32_t *)(base_cpu + 0xD600);
