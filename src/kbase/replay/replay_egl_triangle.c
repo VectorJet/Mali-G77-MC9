@@ -490,9 +490,11 @@ static void build_tiler_context(void *cpu, uint64_t gva, int fb_w, int fb_h) {
      * The mask expansion broke the tiler output -- the tiler may require more polygon list
      * space per level, or the multi-level layout differs from what we assumed.
      * TODO: investigate per-level polygon list layout before re-enabling higher levels. */
-    printf("tiler_ctx: fb=%dx%d hierarchy_mask=0x1 (level 0 only)\n", fb_w, fb_h);
-    tc[2] = (1u << 0)        /* Hierarchy Mask = 1 (level 0 only, 16x16 bins) */
-          | (0u << 13);      /* Sample Pattern = Single-sampled (0) */
+    uint32_t hierarchy_mask = 1u;
+    const char *h_env = getenv("TRI_HIERARCHY");
+    if (h_env) hierarchy_mask = (uint32_t)atoi(h_env);
+    printf("tiler_ctx: fb=%dx%d hierarchy_mask=0x%x\n", fb_w, fb_h, hierarchy_mask);
+    tc[2] = hierarchy_mask;      /* Hierarchy Mask */
     /* FB Width/Height: use raw pixel dimensions, NOT max-index (panfrost v9 genxml
      * uses FB Width/FB Height, not Width-1/Height-1 as in MFBD params).
      * Previously used (fb_w-1)|((fb_h-1)<<16) which encoded 15x15 for a 16x16 fb. */
@@ -890,9 +892,17 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     /* === 2. Position buffer: 3 full-screen triangle vertices (screen-space) === */
     {
         float *pos = (float *)(base + OFF_TRI_POS);
-        pos[0]  = -1.0f;  pos[1]  = -1.0f;  pos[2]  = 0.5f; pos[3]  = 1.0f;
-        pos[4]  =  3.0f;  pos[5]  = -1.0f;  pos[6]  = 0.5f; pos[7]  = 1.0f;
-        pos[8]  = -1.0f;  pos[9]  =  3.0f;  pos[10] = 0.5f; pos[11] = 1.0f;
+        const char *sp_env = getenv("TRI_SCREEN_POS");
+        if (sp_env && atoi(sp_env)) {
+            pos[0]  = 0.0f;           pos[1]  = 0.0f;           pos[2]  = 0.0f; pos[3]  = 1.0f;
+            pos[4]  = (float)fb_w;    pos[5]  = 0.0f;           pos[6]  = 0.0f; pos[7]  = 1.0f;
+            pos[8]  = 0.0f;           pos[9]  = (float)fb_h;    pos[10] = 0.0f; pos[11] = 1.0f;
+            printf("triangle: using SCREEN-SPACE pixel position coordinates {0,0}, {%d,0}, {0,%d}\n", fb_w, fb_h);
+        } else {
+            pos[0]  = -1.0f;  pos[1]  = -1.0f;  pos[2]  = 0.5f; pos[3]  = 1.0f;
+            pos[4]  =  3.0f;  pos[5]  = -1.0f;  pos[6]  = 0.5f; pos[7]  = 1.0f;
+            pos[8]  = -1.0f;  pos[9]  =  3.0f;  pos[10] = 0.5f; pos[11] = 1.0f;
+        }
     }
     uint64_t pos_addr = gva + OFF_TRI_POS;
     printf("triangle: position buffer at gpu 0x%llx\n", (unsigned long long)pos_addr);
