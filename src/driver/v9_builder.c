@@ -288,6 +288,56 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
 #undef DUMP_BLOCK
     }
 
+    /* Validate all GPU pointers in the Fragment JC chain */
+    {
+        uint64_t mem_base = fb->mem_bo->gpu;
+        uint64_t mem_end  = mem_base + fb->mem_bo->size;
+        uint64_t exec_base = fb->exec_bo->gpu;
+        uint64_t exec_end  = exec_base + fb->exec_bo->size;
+        printf("DEBUG: Pointer Range Validation:\n");
+        printf("  mem_bo:  [0x%llx - 0x%llx) size=%zu\n",
+               (unsigned long long)mem_base, (unsigned long long)mem_end, fb->mem_bo->size);
+        printf("  exec_bo: [0x%llx - 0x%llx) size=%zu\n",
+               (unsigned long long)exec_base, (unsigned long long)exec_end, fb->exec_bo->size);
+
+#define CHECK_PTR(label, addr, exp_in) do { \
+    uint64_t _a = (addr); \
+    int _ok = 0; \
+    if ((exp_in) == 1 && _a >= mem_base && _a < mem_end) _ok = 1; \
+    if ((exp_in) == 2 && _a >= exec_base && _a < exec_end) _ok = 1; \
+    printf("  %-20s 0x%016llx  %s\n", (label), (unsigned long long)_a, \
+           _ok ? "OK" : (_a == 0 ? "ZERO" : "OUT-OF-BOUNDS")); \
+} while(0)
+        printf("  --- struct pointers in Fragment JC chain: ---\n");
+        CHECK_PTR("frag_jc (jc)",  fb->frag_jc_gpu, 1);
+        CHECK_PTR("MFBD @ frag_jc", fb->mfbd_gva, 1);
+        CHECK_PTR("sample_loc @ MFBD+0x10", *(uint64_t*)(base_cpu + 0x6010), 1);
+        CHECK_PTR("DCD @ MFBD+0x18", fb->dcd_gpu, 1);
+        CHECK_PTR("tiler_ctx @ MFBD+0x38", fb->tiler_ctx_gpu, 1);
+        printf("  --- DCD referenced pointers: ---\n");
+        CHECK_PTR("depth @ DCD+0x28",  fb->depth_gpu, 1);
+        CHECK_PTR("blend @ DCD+0x30",  fb->blend_gpu, 1);
+        CHECK_PTR("res   @ DCD+0x60",  fb->res_gpu, 1);
+        CHECK_PTR("sp    @ DCD+0x68",  fb->sp_gpu, 1);
+        CHECK_PTR("tls   @ DCD+0x70",  fb->tls_gpu, 1);
+        printf("  --- Tiler context chain: ---\n");
+        CHECK_PTR("polylist @ tc+0x00", fb->polylist_gpu, 1);
+        CHECK_PTR("heap_desc @ tc+0x30", fb->tiler_heap_desc_gpu, 1);
+        printf("  --- Tiler heap chain: ---\n");
+        CHECK_PTR("heap_backing", fb->tiler_heap_backing_gpu, 1);
+        uint64_t heap_top = *(uint64_t *)(base_cpu + 0xD518);
+        printf("  %-20s 0x%016llx  %s (expected 0x%llx)\n",
+               "heap_top @ th+6", (unsigned long long)heap_top,
+               heap_top == fb->tiler_heap_backing_gpu + 0x40000 ? "OK" : "WRONG",
+               (unsigned long long)(fb->tiler_heap_backing_gpu + 0x40000));
+        printf("  --- Shader program chain: ---\n");
+        CHECK_PTR("ISA (exec_bo)", fb->isa_gpu, 2);
+        CHECK_PTR("RT0", fb->rt0_gpu, 1);
+        uint64_t color_addr = *(uint64_t *)(base_cpu + 0x60A0);
+        CHECK_PTR("color_buf @ RT0+0x20", color_addr, 1);
+#undef CHECK_PTR
+    }
+
     ret = kbase_submit_job(dev, fb->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2);
     if (ret < 0) return ret;
     kbase_wait_event(dev, &atom_nr, &event_code);
