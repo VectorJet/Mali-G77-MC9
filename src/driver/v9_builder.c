@@ -159,7 +159,7 @@ struct v9_framebuffer *v9_framebuffer_create(struct kbase_dev *dev, uint32_t wid
     /* Initialize Pre Frame 0 DCD at 0xC100 */
     uint32_t *dcd = (uint32_t *)(base_cpu + 0xC100);
     memset(dcd, 0, 3 * 128);
-    dcd[0] = 0x00000228;
+    dcd[0] = (1u << 0) | (1u << 1) | (1u << 6);  /* match replay flags: allow_fwd_kill, allow_fwd_killed, allow_prim_reorder */
     dcd[1] = 0x0000FFFF;
     dcd[7] = 0x3F800000;
     *(uint64_t *)(dcd + 10) = fb->depth_gpu;
