@@ -21,7 +21,7 @@ extern "C" {
 #define KBASE_BO_COHERENT      (1u << 3)
 
 /* Atom Queue Core Requirements */
-#define KBASE_QUEUE_REQ_FRAGMENT (0x041u) /* BASE_JD_REQ_FS | BASE_JD_REQ_COHERENT_GROUP */
+#define KBASE_QUEUE_REQ_FRAGMENT (0x049u) /* BASE_JD_REQ_FS | BASE_JD_REQ_CF | BASE_JD_REQ_COHERENT_GROUP */
 #define KBASE_QUEUE_REQ_TILER    (0x04Eu) /* PROTECTED | TILER | CS | COHERENT */
 #define KBASE_QUEUE_REQ_FLUSH    (0x002u) /* CS compute slot for cache flush atoms */
 
