@@ -263,6 +263,36 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
         return -EIO;
     }
 
+    /* Dump polygon list and heap state right after TILER_JOB, before reinit clears them */
+    {
+        printf("POST-TILER: Polygon list header (first 32 bytes at 0x7000):\n");
+        uint64_t *pl = (uint64_t *)(base_cpu + 0x7000);
+        for (int i = 0; i < 4; i++) {
+            printf("  +0x%02x: 0x%016llx\n", i * 8, (unsigned long long)pl[i]);
+        }
+        uint64_t *th_p = (uint64_t *)(base_cpu + 0xD500);
+        printf("POST-TILER: Tiler Heap Desc: base=0x%llx bottom=0x%llx top=0x%llx\n",
+               (unsigned long long)th_p[1],
+               (unsigned long long)th_p[2],
+               (unsigned long long)th_p[3]);
+        uint64_t *tc_p = (uint64_t *)(base_cpu + 0xD600);
+        uint64_t polylist_ptr = tc_p[0]; /* words 0-1: polygon list pointer written by GPU */
+        printf("POST-TILER: Tiler Context words 0-1 (polygon list): 0x%016llx\n",
+               (unsigned long long)polylist_ptr);
+        /* Scan tiler heap for non-zero data */
+        uint64_t heap_base = th_p[1];
+        uint64_t heap_bot  = th_p[2];
+        uint64_t heap_sz   = (heap_bot > heap_base) ? (heap_bot - heap_base) : 0;
+        printf("POST-TILER: Heap used = 0x%llx bytes\n", (unsigned long long)heap_sz);
+        if (heap_sz > 0 && heap_sz <= 4096) {
+            printf("POST-TILER: First 32 bytes of heap data:\n");
+            uint64_t *hp = (uint64_t *)(base_cpu + 0x80000);
+            for (int i = 0; i < 4; i++) {
+                printf("  +0x%02x: 0x%016llx\n", i * 8, (unsigned long long)hp[i]);
+            }
+        }
+    }
+
     /* 3. Re-init Fragment JC & Reset Tiler Heap Pointers */
     uint32_t *th = (uint32_t *)(base_cpu + 0xD500);
     *(uint64_t *)(th + 4) = fb->tiler_heap_backing_gpu;
