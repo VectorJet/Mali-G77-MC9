@@ -205,7 +205,7 @@ struct v9_framebuffer *v9_framebuffer_create(struct kbase_dev *dev, uint32_t wid
 
     /* Build Fragment JC (Type 9) */
     uint32_t *fj = (uint32_t *)(base_cpu + 0xE380);
-    fj[4] = (1u << 0) | (9u << 1);
+    fj[4] = (0u << 0) | (9u << 1);  /* job_descriptor_size=0, job_type=9 */
     *(uint64_t *)(fj + 10) = fb->mfbd_gva | 0x01u; /* Polygon List Mode flags = 0x01 */
 
     return fb;
@@ -261,8 +261,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
 
     uint32_t *fj = (uint32_t *)(base_cpu + 0xE380);
     memset(fj, 0, 32);
-    fj[4] = (1u << 0) | (9u << 1);
-    *(uint64_t *)(fj + 6) = 0;
+    fj[4] = (0u << 0) | (9u << 1);  /* job_descriptor_size=0, job_type=9 */
     *(uint64_t *)(fj + 10) = fb->mfbd_gva | 0x01u;
 
     /* Dump MFBD and Fragment JC for debugging */
