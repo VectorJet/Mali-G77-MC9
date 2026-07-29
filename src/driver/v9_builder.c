@@ -263,9 +263,10 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
         return -EIO;
     }
 
-    /* 3. Re-init Fragment JC & Reset Tiler Heap Bottom Pointer */
+    /* 3. Re-init Fragment JC & Reset Tiler Heap Pointers */
     uint32_t *th = (uint32_t *)(base_cpu + 0xD500);
     *(uint64_t *)(th + 4) = fb->tiler_heap_backing_gpu;
+    *(uint64_t *)(th + 6) = fb->tiler_heap_backing_gpu + 0x40000; /* GPU writes top during TILER, restore it */
 
     uint32_t *fj = (uint32_t *)(base_cpu + 0xE380);
     memset(fj, 0, 32);
