@@ -230,9 +230,7 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
     if (!fb || !fb->mem_bo || !fb->mem_bo->dev) return -EINVAL;
     struct kbase_dev *dev = fb->mem_bo->dev;
 
-    /* Zero polygon list header buffer */
     uint8_t *base_cpu = (uint8_t *)fb->mem_bo->cpu;
-    memset(base_cpu + 0x7000, 0, 4096);
 
     /* Re-init TILER_JOB exception header words 0-3 */
     uint32_t *vt = (uint32_t *)(base_cpu + 0xE200);
@@ -293,9 +291,8 @@ int v9_render_triangle(struct v9_framebuffer *fb) {
         }
     }
 
-    /* 3. Re-init Fragment JC & Reset Tiler Heap Pointers */
+    /* 3. Re-init Fragment JC (keep TILER heap output unchanged) */
     uint32_t *th = (uint32_t *)(base_cpu + 0xD500);
-    *(uint64_t *)(th + 4) = fb->tiler_heap_backing_gpu;
     *(uint64_t *)(th + 6) = fb->tiler_heap_backing_gpu + 0x40000; /* GPU writes top during TILER, restore it */
 
     uint32_t *fj = (uint32_t *)(base_cpu + 0xE380);
