@@ -12,6 +12,31 @@ static int test_size(struct kbase_dev *dev, uint32_t width, uint32_t height) {
         return 1;
     }
 
+    /* Assert tiler heap top pointer immediately after creation, before any submissions */
+    {
+        uint64_t *th_words = (uint64_t *)((uint8_t *)fb->mem_bo->cpu + 0xD500);
+        uint64_t heap_base  = th_words[1]; /* th[2..3] = base */
+        uint64_t heap_bot   = th_words[2]; /* th[4..5] = bottom */
+        uint64_t heap_top   = th_words[3]; /* th[6..7] = top */
+        uint64_t expected_top = fb->tiler_heap_backing_gpu + 0x40000;
+        printf("HEAP ASSERT (post-create): base=0x%llx bot=0x%llx top=0x%llx expected=0x%llx %s\n",
+               (unsigned long long)heap_base,
+               (unsigned long long)heap_bot,
+               (unsigned long long)heap_top,
+               (unsigned long long)expected_top,
+               heap_top == expected_top ? "CORRECT" : "CORRUPTED");
+        if (heap_top != expected_top) {
+            printf("  offset from expected: 0x%llx\n",
+                   (unsigned long long)(expected_top - heap_top));
+        }
+    }
+
+    /* Also assert DCD[0] flags value */
+    {
+        uint32_t *dcd = (uint32_t *)((uint8_t *)fb->mem_bo->cpu + 0xC100);
+        printf("DCD[0] flags (post-create): 0x%08x\n", dcd[0]);
+    }
+
     int ret = v9_render_triangle(fb);
     if (ret < 0) {
         fprintf(stderr, "FAIL: v9_render_triangle failed (ret=%d)\n", ret);
