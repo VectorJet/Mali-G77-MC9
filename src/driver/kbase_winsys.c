@@ -62,10 +62,23 @@ struct kbase_ioctl_job_submit {
     uint32_t stride;
 };
 
+/* Actual MTK r49 base_jd_event_v2 format:
+ *   u32  event_code;   // 4 bytes at offset 0
+ *   u8   atom_number;  // 1 byte  at offset 4
+ *   u8   prio;         // 1 byte  at offset 5
+ *   u8   jobslot;      // 1 byte  at offset 6
+ *   u8   unused;       // 1 byte  at offset 7
+ *   u64  timer;        // 8 bytes at offset 8
+ *   u64  udata;        // 8 bytes at offset 16
+ */
 struct base_jd_event_v2 {
-    uint16_t event_code;
+    uint32_t event_code;
     uint8_t  atom_number;
-    uint8_t  udata[21];
+    uint8_t  prio;
+    uint8_t  jobslot;
+    uint8_t  unused;
+    uint64_t timer;
+    uint64_t udata;
 } __attribute__((packed));
 
 struct kbase_dev {
@@ -189,17 +202,19 @@ int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint
 int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_code) {
     if (!dev) return -EINVAL;
 
-    uint8_t ev[24] = {0};
-    ssize_t ret = read(dev->fd, ev, sizeof(ev));
+    struct base_jd_event_v2 ev;
+    memset(&ev, 0, sizeof(ev));
+    ssize_t ret = read(dev->fd, &ev, sizeof(ev));
     if (ret <= 0) {
         return (ret == 0) ? -EAGAIN : -errno;
     }
 
-    uint16_t code = (uint16_t)(ev[0] | (ev[1] << 8));
-    uint8_t nr = ev[2];
+    if (atom_nr)   *atom_nr = ev.atom_number;
+    if (event_code) *event_code = ev.event_code;
 
-    if (atom_nr)   *atom_nr = nr;
-    if (event_code) *event_code = code;
+    printf("kbase_wait_event: code=0x%x atom=%u prio=%u jobslot=%u timer=%llu\n",
+           ev.event_code, ev.atom_number, ev.prio, ev.jobslot,
+           (unsigned long long)ev.timer);
 
     return 0;
 }
