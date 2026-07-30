@@ -170,9 +170,70 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     return bo;
 }
 
+struct kbase_bo *kbase_bo_import_dma_buf(struct kbase_dev *dev, int dma_buf_fd, size_t size) {
+    if (!dev || dma_buf_fd < 0 || size == 0) return NULL;
+
+    int import_fd = dma_buf_fd;
+    union kbase_ioctl_mem_import param = {
+        .in = {
+            .flags = 0xf, /* CPU/GPU read and write */
+            .phandle = (uint64_t)(uintptr_t)&import_fd,
+            .type = BASE_MEM_IMPORT_TYPE_UMM,
+            .padding = 0,
+        },
+    };
+
+    if (ioctl(dev->fd, KBASE_IOCTL_MEM_IMPORT, &param) < 0) {
+        perror("kbase_bo_import_dma_buf: KBASE_IOCTL_MEM_IMPORT failed");
+        return NULL;
+    }
+
+    void *gpu_map = NULL;
+    uint64_t gpu_va = param.out.gpu_va;
+    size_t gpu_map_size = 0;
+    if (param.out.flags & BASE_MEM_NEED_MMAP) {
+        gpu_map_size = param.out.va_pages * (size_t)sysconf(_SC_PAGESIZE);
+        /* This UMM mapping establishes the GPU VA. MTK's kbase rejects CPU
+         * faults on it, so CPU access must use a mapping of the dma-buf fd. */
+        gpu_map = mmap(NULL, gpu_map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       dev->fd, param.out.gpu_va);
+        if (gpu_map == MAP_FAILED) {
+            perror("kbase_bo_import_dma_buf: mmap");
+            return NULL;
+        }
+        gpu_va = (uint64_t)(uintptr_t)gpu_map;
+    }
+
+    void *cpu_ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                         dma_buf_fd, 0);
+    if (cpu_ptr == MAP_FAILED) {
+        perror("kbase_bo_import_dma_buf: dma-buf mmap");
+        if (gpu_map) munmap(gpu_map, gpu_map_size);
+        return NULL;
+    }
+
+    struct kbase_bo *bo = calloc(1, sizeof(*bo));
+    if (!bo) {
+        munmap(cpu_ptr, size);
+        if (gpu_map) munmap(gpu_map, gpu_map_size);
+        return NULL;
+    }
+
+    bo->dev = dev;
+    bo->cpu = cpu_ptr;
+    bo->gpu_map = gpu_map;
+    bo->gpu = gpu_va;
+    bo->size = size;
+    bo->gpu_map_size = gpu_map_size;
+    bo->flags = KBASE_BO_PROT_READ | KBASE_BO_PROT_WRITE;
+    return bo;
+}
+
 void kbase_bo_free(struct kbase_bo *bo) {
     if (!bo) return;
     if (bo->cpu && bo->size > 0) munmap(bo->cpu, bo->size);
+    if (bo->gpu_map && bo->gpu_map_size > 0)
+        munmap(bo->gpu_map, bo->gpu_map_size);
     free(bo);
 }
 

@@ -34,6 +34,20 @@ The kernel driver exposes these ioctls (from `mali_kbase_ioctl.h`):
 
 **UAPI Version**: `BASE_UK_VERSION_MAJOR 11`, `BASE_UK_VERSION_MINOR 13`
 
+### DMA-BUF Import ABI and Mapping
+
+`KBASE_IOCTL_MEM_IMPORT` uses a 24-byte in/out union. For
+`BASE_MEM_IMPORT_TYPE_UMM`, `phandle` points to an `int` containing the
+dma-buf fd; it is not the fd value itself. CPU/GPU read/write imports require
+flags `0xf` on this kernel.
+
+When the ioctl returns `BASE_MEM_NEED_MMAP`, mapping the returned cookie on
+`/dev/mali0` establishes the GPU virtual address. That mapping must not be
+used for CPU access on the MediaTek r49 kernel: a CPU fault produces `SIGBUS`
+and dmesg reports `Invalid CPU access to UMM memory`. Map the dma-buf fd at
+offset zero separately for the CPU pointer, retain the `/dev/mali0` mapping
+for the GPU address, and unmap both when freeing the BO.
+
 ## GPU Properties (ioctl 3)
 
 Queryable properties via `KBASE_IOCTL_GET_GPUPROPS`:
