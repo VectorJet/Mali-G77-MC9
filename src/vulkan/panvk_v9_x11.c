@@ -112,8 +112,12 @@ int main(int argc, char **argv) {
 
     GC gc = XCreateGC(dpy, win, 0, NULL);
 
-    printf("Presenting Vulkan rendered frame onto Termux-X11 window...\n");
-    for (int frame = 0; frame < 50; frame++) {
+    printf("Presenting Vulkan rendered frame onto Termux-X11 window for 1000 frames (~20 seconds)...\n");
+    for (int frame = 0; frame < 1000; frame++) {
+        while (XPending(dpy)) {
+            XEvent ev;
+            XNextEvent(dpy, &ev);
+        }
         XPutImage(dpy, win, gc, ximage, 0, 0, 0, 0, width, height);
         XFlush(dpy);
         usleep(20000); /* ~50 fps display loop */
