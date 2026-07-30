@@ -221,3 +221,16 @@ int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_c
 
     return 0;
 }
+
+int kbase_wait_event_timeout(struct kbase_dev *dev, uint32_t *atom_nr,
+                             uint32_t *event_code, int timeout_ms) {
+    if (!dev || timeout_ms < 0) return -EINVAL;
+
+    struct pollfd pfd = { .fd = dev->fd, .events = POLLIN };
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret < 0) return -errno;
+    if (ret == 0) return -EAGAIN;
+    if (!(pfd.revents & POLLIN)) return -EIO;
+
+    return kbase_wait_event(dev, atom_nr, event_code);
+}

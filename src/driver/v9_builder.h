@@ -28,6 +28,7 @@ struct v9_framebuffer {
     uint64_t tiler_heap_desc_gpu;
     uint64_t tiler_heap_backing_gpu;
     uint64_t polylist_gpu;
+    uint64_t sampleloc_gpu;
     uint64_t blend_gpu;
     uint64_t depth_gpu;
     uint64_t tls_gpu;

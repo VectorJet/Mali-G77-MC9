@@ -1435,7 +1435,14 @@ int main(int argc, char **argv) {
                 {
                     uint32_t *th = (uint32_t *)((uint8_t *)cpu + OFF_TILER_HEAP_DESC);
                     uint64_t heap_base = gva + OFF_TILER_HEAP_BACKING;
-                    *(uint64_t *)(th + 4) = heap_base; /* Reset Bottom = Base */
+                    const char *reset_bottom_env = getenv("TRI_RESET_HEAP_BOTTOM");
+                    int reset_bottom = !reset_bottom_env || atoi(reset_bottom_env);
+                    if (reset_bottom) {
+                        *(uint64_t *)(th + 4) = heap_base;
+                    }
+                    printf("fragment reinit: heap bottom %s (0x%llx)\n",
+                           reset_bottom ? "reset" : "preserved",
+                           (unsigned long long)*(uint64_t *)(th + 4));
                 }
 
                 printf("fragment reinit: MFBD ptr=0x%llx flags=0x%x (%s)\n",
@@ -1462,6 +1469,14 @@ int main(int argc, char **argv) {
             ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
             printf("JOB_SUBMIT (atom 3: Post-Fragment Flush) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
             drain_events(fd);
+
+            const char *watchdog_wait = getenv("TRI_WATCHDOG_WAIT");
+            if (watchdog_wait && atoi(watchdog_wait) > 0) {
+                int seconds = atoi(watchdog_wait);
+                printf("triangle: waiting %d seconds for late Fragment events\n", seconds);
+                sleep((unsigned int)seconds);
+                drain_events(fd);
+            }
 
             /* Check color buffer for shader output */
             volatile uint32_t *color = (volatile uint32_t *)((uint8_t *)cpu + color_off);

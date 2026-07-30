@@ -6,13 +6,34 @@
 
 ---
 
+## Correction (July 30, 2026): Pixel Output Works, Atom 2 Does Not Complete
+
+The original test closed the kbase context roughly 400 ms after submitting the Fragment job. Holding the same replay context open for four seconds reveals the actual terminal event:
+
+```text
+JOB_SUBMIT (atom 2: Fragment) ret=0 errno=0 (Success)
+event drain: no more events after 0 reads
+JOB_SUBMIT (atom 3: Post-Fragment Flush) ret=0 errno=0 (Success)
+event drain: no more events after 0 reads
+triangle: waiting 4 seconds for late Fragment events
+event[0] read=24 code=0x4002 atom=2 data0=0x0 data1=0x0
+event[1] read=24 code=0x1 atom=1 data0=0x0 data1=0x0
+triangle: green=256 red=0 other=0
+```
+
+Therefore, `core_req=0x041`, MFBD flags `0x01`, and the shader linkage are sufficient to execute the shader and write all pixels, but **not** to terminate the Fragment job. The post-flush is queued behind the stuck Fragment and completes only after the GPU watchdog resets job slot 0. Preserving the tiler-advanced heap Bottom instead of resetting it to Base produces the same `0x4002`, ruling out that reset as the cause.
+
+Current status: TILER and pre-flush complete with `0x1`; Fragment renders correctly and then hangs until the watchdog. The polygon-list/primitive termination state remains unresolved.
+
+---
+
 ## 🎯 Executive Summary
 
-We have achieved **100% clean 256/256 solid green pixel rendering (`0xFF00FF00`)** in full hardware **Polygon-List Mode (`flags = 0x01`)** across the complete 3-atom graphics pipeline:
+We have achieved **100% clean 256/256 solid green pixel output (`0xFF00FF00`)** in hardware **Polygon-List Mode (`flags = 0x01`)** across the 3-atom graphics pipeline:
 
 Atom 0 (TILER_JOB) -> Atom 1 (Cache Flush) -> Atom 2 (Fragment JC) -> Atom 3 (Post-Flush)
 
-All hardware atoms return `0x1 DONE` exception status, bin geometry via the Hardware Tiler, and render full-frame color pixels to GPU memory.
+The Hardware Tiler bins geometry and the Fragment engine renders full-frame color pixels to GPU memory. As corrected above, Atom 2 does not return `0x1 DONE`; it later times out with `0x4002`.
 
 ---
 

@@ -21,7 +21,7 @@ extern "C" {
 #define KBASE_BO_COHERENT      (1u << 3)
 
 /* Atom Queue Core Requirements */
-#define KBASE_QUEUE_REQ_FRAGMENT (0x049u) /* BASE_JD_REQ_FS | BASE_JD_REQ_CF | BASE_JD_REQ_COHERENT_GROUP */
+#define KBASE_QUEUE_REQ_FRAGMENT (0x041u) /* BASE_JD_REQ_FS | BASE_JD_REQ_COHERENT_GROUP */
 #define KBASE_QUEUE_REQ_TILER    (0x04Eu) /* PROTECTED | TILER | CS | COHERENT */
 #define KBASE_QUEUE_REQ_FLUSH    (0x002u) /* CS compute slot for cache flush atoms */
 
@@ -45,6 +45,8 @@ void kbase_bo_free(struct kbase_bo *bo);
 int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr,
                       uint8_t jobslot, uint32_t frame_nr);
 int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_code);
+int kbase_wait_event_timeout(struct kbase_dev *dev, uint32_t *atom_nr,
+                             uint32_t *event_code, int timeout_ms);
 
 #ifdef __cplusplus
 }
