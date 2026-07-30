@@ -3,5 +3,10 @@ mali-re-workspace/
 *.so
 *.o
 src/vulkan/panvk_v9_x11
-src/vulkan/test_*
+src/vulkan/test_pan_kmod
+src/vulkan/test_v9_cmd_stream
+src/vulkan/test_panvk_v9
+src/vulkan/test_vulkan_loader_icd
+src/vulkan/test_combined_steps1_4
+
 
