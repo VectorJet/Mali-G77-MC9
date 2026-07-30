@@ -85,7 +85,11 @@
 #define OFF_TRI_TLS           0xE0A0  /* TLS/Local Storage (32 bytes) */
 #define OFF_TRI_VTX_JOB       0xE200  /* TILER_JOB (256 bytes, 128-align at 0xE200=113*128) */
 #define OFF_TRI_INDICES       0xE0C0  /* Index buffer (3 x uint16_t = 6 bytes) */
-#define OFF_TRI_FRAG_JC       0xE380  /* Fragment JC (128 bytes, 128-align at 0xE380) */
+#define OFF_TRI_FRAG_JC       0xE380  /* Fragment JC 1 (128 bytes) */
+#define OFF_TRI_FRAG_JC_2     0xE400  /* Fragment JC 2 (128 bytes, end-of-frame completion pass) */
+#define OFF_TRI_MFBD_2        0xE480  /* MFBD 2 descriptor (128 bytes) */
+#define OFF_TRI_DCD_2         0xE500  /* DCD 2 descriptor (128 bytes) */
+
 
 struct base_dependency {
     uint8_t atom_id;
@@ -1118,21 +1122,54 @@ static void build_triangle_mode(void *cpu, uint64_t gva, int fb_w, int fb_h) {
     printf("triangle: TILER_JOB at gpu 0x%llx (type=7, no VS)\n", (unsigned long long)vtx_job_addr);
     dump_words("TJ full (256 bytes)", base + OFF_TRI_VTX_JOB, 256);
 
-    /* === 6. Fragment Job (128 bytes at OFF_TRI_FRAG_JC = 0xE380) ===
-     * Next pointer is ZEROED — no hardware chain. Will be submitted
-     * as a separate kbase atom with dependency on the cache flush. */
+    /* === 6. Hardware Chained Fragment Jobs 1 & 2 + MFBD 2 + DCD 2 === */
+    /* Job 2: End-of-frame / completion pass (offset OFF_TRI_FRAG_JC_2 = 0xE400) */
+    uint32_t *fj2 = (uint32_t *)(base + OFF_TRI_FRAG_JC_2);
+    memset(fj2, 0, 128);
+    fj2[4] = (2u << 16) | (9u << 1);  /* 0x00020012: index 2 in chain, Type 9 (Fragment) */
+    fj2[5] = 1;                        /* Bit 0 = 1 */
+    *(uint64_t *)(fj2 + 6) = 0;        /* Next = NULL (end of hardware chain) */
+    fj2[8] = 0;
+    fj2[9] = 0x00030003;
+    *(uint64_t *)(fj2 + 10) = (gva + OFF_TRI_MFBD_2) | 0x03; /* MFBD 2 | 0x03 */
+
+    /* Job 1: Main polygon-list rendering pass (offset OFF_TRI_FRAG_JC = 0xE380) */
     uint32_t *fj = (uint32_t *)(base + OFF_TRI_FRAG_JC);
     memset(fj, 0, 128);
-    fj[4] = (1u << 0) | (9u << 1);
+    fj[4] = (1u << 16) | (9u << 1);   /* 0x00010012: index 1 in chain, Type 9 (Fragment) */
+    fj[5] = 0;
+    *(uint64_t *)(fj + 6) = gva + OFF_TRI_FRAG_JC_2; /* Next = Job 2 GPU VA */
     fj[8] = 0;
-    fj[9] = 0;  /* Match vendor capture 001_atom2_hw_jc.bin word 9 = 0 */
-    *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x81;  /* Bit 0=1: polygon-list mode, bit 7=1: valid */
-    *(uint64_t *)(fj + 12) = 0;
-    fj[14] = 0;
-    /* Next = 0 (already zeroed by memset) */
+    fj[9] = 0;
+    *(uint64_t *)(fj + 10) = (gva + OFF_SCRATCH_MFBD) | 0x01; /* MFBD 1 | 0x01 (polygon-list mode) */
 
-    printf("triangle: Fragment JC at gpu 0x%llx\n", (unsigned long long)(gva + OFF_TRI_FRAG_JC));
-    dump_words("triangle Fragment JC", base + OFF_TRI_FRAG_JC, 64);
+    /* DCD 2 and MFBD 2 setup */
+    {
+        uint32_t *dcd2 = (uint32_t *)(base + OFF_TRI_DCD_2);
+        memset(dcd2, 0, 128);
+        *(uint64_t *)(dcd2 + 28) = tls_addr;
+
+        uint32_t *mfbd2 = (uint32_t *)(base + OFF_TRI_MFBD_2);
+        memset(mfbd2, 0, 128);
+        mfbd2[0] = 0;
+        mfbd2[2] = 0x00010000;
+        *(uint64_t *)(base + OFF_TRI_MFBD_2 + 0x10) = gva + OFF_SCRATCH_SAMPLELOC;
+        *(uint64_t *)(base + OFF_TRI_MFBD_2 + 0x18) = gva + OFF_TRI_DCD_2;
+        
+        uint32_t *params2 = (uint32_t *)(base + OFF_TRI_MFBD_2 + 0x20);
+        params2[0] = (fb_w - 1) | ((fb_h - 1) << 16);
+        params2[1] = 0;
+        params2[2] = (fb_w - 1) | ((fb_h - 1) << 16);
+        params2[3] = 0x01039000; /* Render target count = 0 (no color RT) */
+        params2[4] = 0x00200000;
+        *(uint64_t *)((uint8_t *)params2 + 24) = gva + OFF_TILER_CTX;
+    }
+
+    printf("triangle: Fragment JC 1 at gpu 0x%llx (Next -> JC 2 at 0x%llx)\n",
+           (unsigned long long)(gva + OFF_TRI_FRAG_JC),
+           (unsigned long long)(gva + OFF_TRI_FRAG_JC_2));
+    dump_words("triangle Fragment JC 1", base + OFF_TRI_FRAG_JC, 64);
+    dump_words("triangle Fragment JC 2", base + OFF_TRI_FRAG_JC_2, 64);
     printf("=== BUILD TRIANGLE MODE DONE ===\n\n");
 }
 
@@ -1404,34 +1441,47 @@ int main(int argc, char **argv) {
             dump_words("Tiler Heap Desc before Fragment JC (32 bytes)",
                        (uint8_t *)cpu + OFF_TILER_HEAP_DESC, 32);
 
-            /* Reinitialize Fragment JC header words 0-3 (exception status,
-             * fault pointer) that the standalone diagnostic wrote back.
-             * Also restore Type=9 and clear Next pointer so the second
-             * submit doesn't see stale exception data and fault 0x58. */
+            /* Reinitialize Fragment JC 1 & 2 headers before Atom 2 submit */
             {
                 uint8_t *cpu_local = (uint8_t *)cpu;
+
+                /* Reinit Job 2 (Completion Pass) */
+                uint32_t *frag2_local = (uint32_t *)(cpu_local + OFF_TRI_FRAG_JC_2);
+                memset(frag2_local, 0, 32);  /* Zero status/fault words */
+                frag2_local[4] = (2u << 16) | (9u << 1); /* 0x00020012 */
+                frag2_local[5] = 1;
+                *(uint64_t *)(frag2_local + 6) = 0;       /* Next = NULL */
+                frag2_local[8] = 0;
+                frag2_local[9] = 0x00030003;
+                *(uint64_t *)(frag2_local + 10) = (gva + OFF_TRI_MFBD_2) | 0x03;
+
+                /* Reinit Job 1 (Main Polygon List Draw Pass) */
                 uint32_t *frag_local = (uint32_t *)(cpu_local + OFF_TRI_FRAG_JC);
-                memset(frag_local, 0, 32);  /* Zero header words 0-7 */
-                frag_local[4] = (1u << 0) | (9u << 1);  /* Restore Type=9 (Fragment), job valid */
-                *(uint64_t *)(frag_local + 6) = 0;       /* Next = 0 (no hardware chain) */
-                /* Restore MFBD pointer at words 10-11 which was also written back.
-                 * In v9, the fragment JC's MFBD pointer is at offset 0x28 (word 10).
-                 * Bit 0 selects iteration mode:
-                 *   0 = tile-iteration (bypasses polygon list, works with tiler=NULL)
-                 *   1 = polygon-list mode (reads tiler binning output, required with tiler=active)
-                 * After a successful TILER_JOB the polygon list is populated, so bit 0=1
-                 * is the correct mode. Bit 0=0 caused DATA_INVALID (0x58) with tiler=active.
-                 * Use env var TRI_MFBD_BIT0=0 to test tile-iteration mode for comparison. */
+                memset(frag_local, 0, 32);  /* Zero status/fault words */
+                frag_local[4] = (1u << 16) | (9u << 1); /* 0x00010012 */
+                frag_local[5] = 0;
+                *(uint64_t *)(frag_local + 6) = gva + OFF_TRI_FRAG_JC_2; /* Next = Job 2 */
+                frag_local[8] = 0;
+                frag_local[9] = 0;
+
                 int mfbd_flags = 0x01; /* Polygon List Mode (bit 0=1, bit 7=0) */
                 const char *mfbd_bit0_env = getenv("TRI_MFBD_BIT0");
                 if (mfbd_bit0_env) mfbd_flags = atoi(mfbd_bit0_env);
                 uint64_t mfbd_ptr = (gva + OFF_SCRATCH_MFBD) | (uint64_t)mfbd_flags;
+
+                const char *single_job_env = getenv("TRI_SINGLE_JOB");
+                if (single_job_env && atoi(single_job_env)) {
+                    *(uint64_t *)(frag_local + 6) = 0;
+                    printf("fragment reinit: FORCED SINGLE JOB (Next=0)\n");
+                }
+
                 const char *null_tiler_env = getenv("TRI_NULL_TILER");
                 if (null_tiler_env && atoi(null_tiler_env)) {
                     *(uint64_t *)(cpu_local + OFF_SCRATCH_MFBD + 0x38) = 0;
                     printf("fragment reinit: FORCED MFBD+0x38 = NULL (0)\n");
                 }
-                /* Reset Bottom pointer in Tiler Heap Desc back to heap_base so Fragment HW reads from start of heap */
+
+                /* Reset Bottom pointer in Tiler Heap Desc back to heap_base */
                 {
                     uint32_t *th = (uint32_t *)((uint8_t *)cpu + OFF_TILER_HEAP_DESC);
                     uint64_t heap_base = gva + OFF_TILER_HEAP_BACKING;
@@ -1445,9 +1495,9 @@ int main(int argc, char **argv) {
                            (unsigned long long)*(uint64_t *)(th + 4));
                 }
 
-                printf("fragment reinit: MFBD ptr=0x%llx flags=0x%x (%s)\n",
+                printf("fragment reinit: Job 1 MFBD ptr=0x%llx flags=0x%x Next=0x%llx\n",
                        (unsigned long long)mfbd_ptr, mfbd_flags,
-                       (mfbd_flags & 1) ? "polygon-list mode" : "tile-iteration mode");
+                       (unsigned long long)*(uint64_t *)(frag_local + 6));
                 *(uint64_t *)(frag_local + 10) = mfbd_ptr;
             }
 
@@ -1456,6 +1506,8 @@ int main(int argc, char **argv) {
             ret = ioctl(fd, KBASE_IOCTL_JOB_SUBMIT, &sub_single);
             printf("JOB_SUBMIT (atom 2: Fragment) ret=%d errno=%d (%s)\n", ret, errno, strerror(errno));
             drain_events(fd);
+            dump_words("POST Fragment JC 1 (immediately after submit)", (uint8_t *)cpu + OFF_TRI_FRAG_JC, 64);
+            dump_words("POST Fragment JC 2 (immediately after submit)", (uint8_t *)cpu + OFF_TRI_FRAG_JC_2, 64);
 
             /* Submit Atom 3: Post-Fragment Cache Flush — flushes GPU L2 cache to CPU system RAM */
             {
