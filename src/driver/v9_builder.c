@@ -187,8 +187,9 @@ struct v9_framebuffer *v9_framebuffer_create(struct kbase_dev *dev, uint32_t wid
 
     uint32_t *dw = vt + 32;
     dw[0] = (1u << 0) | (1u << 1) | (1u << 6);
-    dw[1] = 0xFFFF | (0x1u << 16);
-    *(uint64_t *)(dw + 2) = fb->pos_gpu;
+    uint64_t V = fb->pos_gpu >> 6;
+    dw[2] = (uint32_t)((V & 0x03FFFFFFu) << 6); /* Pointer bits 25:0, Packet=0 */
+    dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu); /* Pointer bits 57:26 */
     dw[4] = (16u << 16);
     dw[7] = 0x3F800000;
     *(uint64_t *)(dw + 10) = fb->depth_gpu;
