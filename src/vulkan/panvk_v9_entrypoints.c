@@ -213,3 +213,33 @@ uint32_t panvk_v9_read_pixel(VkCommandBuffer commandBuffer, uint32_t x, uint32_t
     }
     return 0;
 }
+
+PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
+    if (!pName) return NULL;
+#define MATCH(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction)name
+    MATCH(vkCreateInstance);
+    MATCH(vkDestroyInstance);
+    MATCH(vkEnumeratePhysicalDevices);
+    MATCH(vkGetPhysicalDeviceProperties);
+    MATCH(vkCreateDevice);
+    MATCH(vkDestroyDevice);
+    MATCH(vkGetDeviceQueue);
+    MATCH(vkCreateCommandPool);
+    MATCH(vkDestroyCommandPool);
+    MATCH(vkAllocateCommandBuffers);
+    MATCH(vkFreeCommandBuffers);
+    MATCH(vkBeginCommandBuffer);
+    MATCH(vkEndCommandBuffer);
+    MATCH(vkCmdBeginRenderPass);
+    MATCH(vkCmdDrawIndexed);
+    MATCH(vkCmdEndRenderPass);
+    MATCH(vkQueueSubmit);
+    MATCH(vkQueueWaitIdle);
+    MATCH(panvk_v9_read_pixel);
+#undef MATCH
+    return NULL;
+}
+
+PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName) {
+    return vkGetInstanceProcAddr(instance, pName);
+}

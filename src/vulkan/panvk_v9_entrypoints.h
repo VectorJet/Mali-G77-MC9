@@ -132,6 +132,10 @@ VkResult vkQueueWaitIdle(VkQueue queue);
 
 uint32_t panvk_v9_read_pixel(VkCommandBuffer commandBuffer, uint32_t x, uint32_t y);
 
+typedef void (*PFN_vkVoidFunction)(void);
+PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName);
+PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+
 #ifdef __cplusplus
 }
 #endif
