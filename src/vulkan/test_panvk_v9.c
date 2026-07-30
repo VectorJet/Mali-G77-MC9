@@ -66,10 +66,9 @@ int main(int argc, char **argv) {
 
     struct VkRenderPassBeginInfo rpInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderAreaExtent = { .width = 16, .height = 16 },
-        .clearColor = 0xFF0000FF,
+        .renderArea.extent = { .width = 16, .height = 16 },
     };
-    vkCmdBeginRenderPass(cmd, &rpInfo);
+    vkCmdBeginRenderPass(cmd, &rpInfo, 0);
     vkCmdDrawIndexed(cmd, 3, 1, 0, 0, 0);
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);

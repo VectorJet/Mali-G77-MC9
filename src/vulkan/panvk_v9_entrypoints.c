@@ -11,21 +11,31 @@
 
 #include "panvk_v9_entrypoints.h"
 
+#define ICD_LOADER_MAGIC 0x01CDC0DEu
+
+static inline void set_loader_magic(void *object) {
+    *(uintptr_t *)object = ICD_LOADER_MAGIC;
+}
+
 struct VkInstance_T {
+    uintptr_t loader_data;
     struct VkPhysicalDevice_T *phys_dev;
 };
 
 struct VkPhysicalDevice_T {
+    uintptr_t loader_data;
     struct pan_kmod_dev *kdev;
     struct pan_kmod_dev_props props;
 };
 
 struct VkDevice_T {
+    uintptr_t loader_data;
     struct pan_kmod_dev *kdev;
     struct VkPhysicalDevice_T *phys_dev;
 };
 
 struct VkQueue_T {
+    uintptr_t loader_data;
     struct VkDevice_T *device;
 };
 
@@ -34,6 +44,7 @@ struct VkCommandPool_T {
 };
 
 struct VkCommandBuffer_T {
+    uintptr_t loader_data;
     struct VkDevice_T *device;
     struct v9_cmd_buffer *v9_cmd;
 };
@@ -60,6 +71,14 @@ struct VkSwapchainKHR_T {
 struct VkImage_T {
     struct VkSwapchainKHR_T *swapchain;
     uint32_t index;
+    uint32_t width;
+    uint32_t height;
+    struct pan_kmod_bo *bo;
+    VkDeviceSize memory_offset;
+};
+
+struct VkImageView_T {
+    int dummy;
 };
 
 struct VkDeviceMemory_T {
@@ -71,6 +90,7 @@ struct VkDeviceMemory_T {
 struct VkBuffer_T {
     VkDeviceSize size;
     struct pan_kmod_bo *bo;
+    VkDeviceSize memory_offset;
 };
 
 struct VkShaderModule_T {
@@ -115,7 +135,7 @@ struct VkSemaphore_T {
 };
 
 struct VkFence_T {
-    int dummy;
+    bool signaled;
 };
 
 /* Loader Negotiation */
@@ -198,11 +218,13 @@ VkResult vkCreateInstance(const struct VkInstanceCreateInfo *pCreateInfo, void *
 
     struct VkInstance_T *inst = calloc(1, sizeof(*inst));
     if (!inst) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    set_loader_magic(inst);
 
     struct pan_kmod_dev *kdev = pan_kmod_dev_create(NULL);
     if (kdev) {
         struct VkPhysicalDevice_T *pdev = calloc(1, sizeof(*pdev));
         if (pdev) {
+            set_loader_magic(pdev);
             pdev->kdev = kdev;
             pan_kmod_dev_query_props(kdev, &pdev->props);
             inst->phys_dev = pdev;
@@ -356,6 +378,7 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
     struct VkDevice_T *dev = calloc(1, sizeof(*dev));
     if (!dev) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+    set_loader_magic(dev);
     dev->phys_dev = physicalDevice;
     dev->kdev = physicalDevice->kdev;
     *pDevice = dev;
@@ -371,13 +394,14 @@ void vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queue
     if (!device || !pQueue) return;
     struct VkQueue_T *queue = calloc(1, sizeof(*queue));
     if (!queue) return;
+    set_loader_magic(queue);
     queue->device = device;
     *pQueue = queue;
 }
 
 /* Memory Allocation & Buffer Management */
 VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pAllocateInfo, void *pAllocator, VkDeviceMemory *pMemory) {
-    if (!device || !pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device || !device->kdev || !pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct VkDeviceMemory_T *mem = calloc(1, sizeof(*mem));
     if (!mem) return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -433,8 +457,52 @@ void vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, struct VkMe
 VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
     if (buffer && memory) {
         buffer->bo = memory->bo;
+        buffer->memory_offset = memoryOffset;
     }
     return VK_SUCCESS;
+}
+
+VkResult vkCreateImage(VkDevice device, const struct VkImageCreateInfo *pCreateInfo,
+                       void *pAllocator, VkImage *pImage) {
+    if (!pCreateInfo || !pImage) return VK_ERROR_INITIALIZATION_FAILED;
+    struct VkImage_T *image = calloc(1, sizeof(*image));
+    if (!image) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    image->width = pCreateInfo->extent.width;
+    image->height = pCreateInfo->extent.height;
+    *pImage = image;
+    return VK_SUCCESS;
+}
+
+void vkDestroyImage(VkDevice device, VkImage image, void *pAllocator) {
+    if (image && !image->swapchain) free(image);
+}
+
+void vkGetImageMemoryRequirements(VkDevice device, VkImage image,
+                                  struct VkMemoryRequirements *pMemoryRequirements) {
+    if (!pMemoryRequirements) return;
+    VkDeviceSize size = image ? (VkDeviceSize)image->width * image->height * 4 : 4096;
+    pMemoryRequirements->size = size > 0 ? size : 4096;
+    pMemoryRequirements->alignment = 64;
+    pMemoryRequirements->memoryTypeBits = 1;
+}
+
+VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory,
+                           VkDeviceSize memoryOffset) {
+    if (!image || !memory) return VK_ERROR_INITIALIZATION_FAILED;
+    image->bo = memory->bo;
+    image->memory_offset = memoryOffset;
+    return VK_SUCCESS;
+}
+
+VkResult vkCreateImageView(VkDevice device, const void *pCreateInfo, void *pAllocator,
+                           VkImageView *pView) {
+    if (!pView) return VK_ERROR_INITIALIZATION_FAILED;
+    *pView = calloc(1, sizeof(struct VkImageView_T));
+    return *pView ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
+void vkDestroyImageView(VkDevice device, VkImageView imageView, void *pAllocator) {
+    free(imageView);
 }
 
 /* Shader Module & Pipeline Implementation */
@@ -582,12 +650,37 @@ void vkDestroySemaphore(VkDevice device, VkSemaphore semaphore, void *pAllocator
 VkResult vkCreateFence(VkDevice device, const void *pCreateInfo, void *pAllocator, VkFence *pFence) {
     if (!pFence) return VK_ERROR_INITIALIZATION_FAILED;
     struct VkFence_T *f = calloc(1, sizeof(*f));
+    if (f && pCreateInfo) {
+        const uint32_t *flags = (const uint32_t *)((const uint8_t *)pCreateInfo + 16);
+        f->signaled = (*flags & 1u) != 0;
+    }
     *pFence = f;
-    return VK_SUCCESS;
+    return f ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
 void vkDestroyFence(VkDevice device, VkFence fence, void *pAllocator) {
     if (fence) free(fence);
+}
+
+VkResult vkResetFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences) {
+    if (!pFences) return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t i = 0; i < fenceCount; i++) {
+        if (pFences[i]) pFences[i]->signaled = false;
+    }
+    return VK_SUCCESS;
+}
+
+VkResult vkGetFenceStatus(VkDevice device, VkFence fence) {
+    return fence && fence->signaled ? VK_SUCCESS : VK_NOT_READY;
+}
+
+VkResult vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
+                         uint32_t waitAll, uint64_t timeout) {
+    if (!pFences) return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t i = 0; i < fenceCount; i++) {
+        if (pFences[i]) pFences[i]->signaled = true;
+    }
+    return VK_SUCCESS;
 }
 
 /* Command Pool & Buffer Management */
@@ -610,6 +703,7 @@ VkResult vkAllocateCommandBuffers(VkDevice device, const struct VkCommandBufferA
     for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; i++) {
         struct VkCommandBuffer_T *cb = calloc(1, sizeof(*cb));
         if (!cb) return VK_ERROR_OUT_OF_HOST_MEMORY;
+        set_loader_magic(cb);
         cb->device = device;
         pCommandBuffers[i] = cb;
     }
@@ -651,19 +745,45 @@ void vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding
 void vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t indexType) {
 }
 
+void vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer,
+                     uint32_t regionCount, const struct VkBufferCopy *pRegions) {
+    if (!srcBuffer || !srcBuffer->bo || !dstBuffer || !dstBuffer->bo || !pRegions) return;
+
+    for (uint32_t i = 0; i < regionCount; i++) {
+        VkDeviceSize src_offset = srcBuffer->memory_offset + pRegions[i].srcOffset;
+        VkDeviceSize dst_offset = dstBuffer->memory_offset + pRegions[i].dstOffset;
+        VkDeviceSize size = pRegions[i].size;
+        if (src_offset > srcBuffer->bo->size || size > srcBuffer->bo->size - src_offset ||
+            dst_offset > dstBuffer->bo->size || size > dstBuffer->bo->size - dst_offset) {
+            continue;
+        }
+        memcpy((uint8_t *)dstBuffer->bo->cpu + dst_offset,
+               (const uint8_t *)srcBuffer->bo->cpu + src_offset, size);
+    }
+}
+
+void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask,
+                          uint32_t dstStageMask, uint32_t dependencyFlags,
+                          uint32_t memoryBarrierCount, const void *pMemoryBarriers,
+                          uint32_t bufferMemoryBarrierCount, const void *pBufferMemoryBarriers,
+                          uint32_t imageMemoryBarrierCount, const void *pImageMemoryBarriers) {
+}
+
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
     if (commandBuffer && commandBuffer->v9_cmd) {
         v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
     }
 }
 
-void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer, const struct VkRenderPassBeginInfo *pRenderPassBegin) {
+void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
+                          const struct VkRenderPassBeginInfo *pRenderPassBegin,
+                          uint32_t contents) {
     if (!commandBuffer || !pRenderPassBegin) return;
 
     struct v9_render_target_config config = {
-        .width = pRenderPassBegin->renderAreaExtent.width > 0 ? pRenderPassBegin->renderAreaExtent.width : 300,
-        .height = pRenderPassBegin->renderAreaExtent.height > 0 ? pRenderPassBegin->renderAreaExtent.height : 300,
-        .clear_color = pRenderPassBegin->clearColor,
+        .width = pRenderPassBegin->renderArea.extent.width > 0 ? pRenderPassBegin->renderArea.extent.width : 300,
+        .height = pRenderPassBegin->renderArea.extent.height > 0 ? pRenderPassBegin->renderArea.extent.height : 300,
+        .clear_color = 0,
     };
 
     if (commandBuffer->v9_cmd) {
@@ -704,10 +824,15 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
             }
         }
     }
+    if (fence) ((VkFence)fence)->signaled = true;
     return VK_SUCCESS;
 }
 
 VkResult vkQueueWaitIdle(VkQueue queue) {
+    return VK_SUCCESS;
+}
+
+VkResult vkDeviceWaitIdle(VkDevice device) {
     return VK_SUCCESS;
 }
 
@@ -908,6 +1033,7 @@ VkResult vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint
 VkResult vkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, void *semaphore, void *fence, uint32_t *pImageIndex) {
     if (!swapchain || !pImageIndex) return VK_ERROR_INITIALIZATION_FAILED;
     *pImageIndex = 0;
+    if (fence) ((VkFence)fence)->signaled = true;
     return VK_SUCCESS;
 }
 
@@ -989,6 +1115,12 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
     MATCH(vkDestroyBuffer);
     MATCH(vkGetBufferMemoryRequirements);
     MATCH(vkBindBufferMemory);
+    MATCH(vkCreateImage);
+    MATCH(vkDestroyImage);
+    MATCH(vkGetImageMemoryRequirements);
+    MATCH(vkBindImageMemory);
+    MATCH(vkCreateImageView);
+    MATCH(vkDestroyImageView);
     MATCH(vkCreateShaderModule);
     MATCH(vkDestroyShaderModule);
     MATCH(vkCreatePipelineCache);
@@ -1013,6 +1145,9 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
     MATCH(vkDestroySemaphore);
     MATCH(vkCreateFence);
     MATCH(vkDestroyFence);
+    MATCH(vkResetFences);
+    MATCH(vkGetFenceStatus);
+    MATCH(vkWaitForFences);
     MATCH(vkCreateCommandPool);
     MATCH(vkDestroyCommandPool);
     MATCH(vkAllocateCommandBuffers);
@@ -1025,12 +1160,15 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
     MATCH(vkCmdBindDescriptorSets);
     MATCH(vkCmdBindVertexBuffers);
     MATCH(vkCmdBindIndexBuffer);
+    MATCH(vkCmdCopyBuffer);
+    MATCH(vkCmdPipelineBarrier);
     MATCH(vkCmdDraw);
     MATCH(vkCmdBeginRenderPass);
     MATCH(vkCmdDrawIndexed);
     MATCH(vkCmdEndRenderPass);
     MATCH(vkQueueSubmit);
     MATCH(vkQueueWaitIdle);
+    MATCH(vkDeviceWaitIdle);
     MATCH(vkCreateXlibSurfaceKHR);
     MATCH(vkCreateXcbSurfaceKHR);
     MATCH(vkGetPhysicalDeviceXcbPresentationSupportKHR);

@@ -104,10 +104,9 @@ int main(int argc, char **argv) {
     vkBeginCommandBuffer(cmd3, &begin3);
     struct VkRenderPassBeginInfo rp3 = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderAreaExtent = { .width = 16, .height = 16 },
-        .clearColor = 0xFF0000FF,
+        .renderArea.extent = { .width = 16, .height = 16 },
     };
-    vkCmdBeginRenderPass(cmd3, &rp3);
+    vkCmdBeginRenderPass(cmd3, &rp3, 0);
     vkCmdDrawIndexed(cmd3, 3, 1, 0, 0, 0);
     vkCmdEndRenderPass(cmd3);
     vkEndCommandBuffer(cmd3);
@@ -157,7 +156,7 @@ int main(int argc, char **argv) {
     typedef void (*PFN_vkFreeCommandBuffers)(VkDevice, VkCommandPool, uint32_t, const VkCommandBuffer *);
     typedef VkResult (*PFN_vkBeginCommandBuffer)(VkCommandBuffer, const struct VkCommandBufferBeginInfo *);
     typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
-    typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const struct VkRenderPassBeginInfo *);
+    typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const struct VkRenderPassBeginInfo *, uint32_t);
     typedef void (*PFN_vkCmdDrawIndexed)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t);
     typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
     typedef VkResult (*PFN_vkQueueSubmit)(VkQueue, uint32_t, const struct VkSubmitInfo *, void *);
@@ -213,8 +212,8 @@ int main(int argc, char **argv) {
 
     struct VkCommandBufferBeginInfo begin4 = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     p_vkBeginCommandBuffer(cmd4, &begin4);
-    struct VkRenderPassBeginInfo rp4 = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderAreaExtent = { .width = width, .height = height }, .clearColor = 0xFF0000FF };
-    p_vkCmdBeginRenderPass(cmd4, &rp4);
+    struct VkRenderPassBeginInfo rp4 = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderArea.extent = { .width = width, .height = height } };
+    p_vkCmdBeginRenderPass(cmd4, &rp4, 0);
     p_vkCmdDrawIndexed(cmd4, 3, 1, 0, 0, 0);
     p_vkCmdEndRenderPass(cmd4);
     p_vkEndCommandBuffer(cmd4);

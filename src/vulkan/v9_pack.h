@@ -90,7 +90,7 @@ static inline void v9_pack_mfbd(uint32_t *mfbd, uint32_t width, uint32_t height,
 
 static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend_gpu,
                                uint64_t res_gpu, uint64_t sp_gpu, uint64_t tls_gpu) {
-    memset(dcd, 0, 128);
+    memset(dcd, 0, 3 * 128);
     dcd[0] = 0x00000228; /* pixel_kill=WEAK_EARLY, zs_update=STRONG_EARLY */
     dcd[1] = 0x0000FFFF; /* Sample mask 0xFFFF */
     dcd[7] = 0x3F800000;
@@ -141,9 +141,13 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     *(uint64_t *)(se + 14) = 0;
 }
 
-static inline void v9_pack_frag_job(uint32_t *fj, uint64_t mfbd_gpu) {
+static inline void v9_pack_frag_job(uint32_t *fj, uint64_t mfbd_gpu,
+                                    uint32_t width, uint32_t height) {
     memset(fj, 0, 128);
     fj[4] = (1u << 0) | (9u << 1);              /* Type = 9 (Fragment JC) */
+    fj[8] = 0;                                  /* Minimum tile = (0, 0) */
+    fj[9] = ((width - 1) >> 4) |
+            (((height - 1) >> 4) << 16);        /* Inclusive maximum tile */
     *(uint64_t *)(fj + 10) = mfbd_gpu | 0x01u;  /* Polygon List Mode flags = 0x01 */
 }
 

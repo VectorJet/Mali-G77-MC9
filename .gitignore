@@ -8,5 +8,5 @@ src/vulkan/test_v9_cmd_stream
 src/vulkan/test_panvk_v9
 src/vulkan/test_vulkan_loader_icd
 src/vulkan/test_combined_steps1_4
-
-
+a.out
+src/kbase/test_dma_heap_import

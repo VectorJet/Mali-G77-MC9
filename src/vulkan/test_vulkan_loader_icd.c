@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
     typedef void (*PFN_vkFreeCommandBuffers)(VkDevice, VkCommandPool, uint32_t, const VkCommandBuffer *);
     typedef VkResult (*PFN_vkBeginCommandBuffer)(VkCommandBuffer, const struct VkCommandBufferBeginInfo *);
     typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
-    typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const struct VkRenderPassBeginInfo *);
+    typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const struct VkRenderPassBeginInfo *, uint32_t);
     typedef void (*PFN_vkCmdDrawIndexed)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t);
     typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
     typedef VkResult (*PFN_vkQueueSubmit)(VkQueue, uint32_t, const struct VkSubmitInfo *, void *);
@@ -114,10 +114,9 @@ int main(int argc, char **argv) {
     pfn_vkBeginCommandBuffer(cmd, &beginInfo);
     struct VkRenderPassBeginInfo rpInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderAreaExtent = { .width = 16, .height = 16 },
-        .clearColor = 0xFF0000FF,
+        .renderArea.extent = { .width = 16, .height = 16 },
     };
-    pfn_vkCmdBeginRenderPass(cmd, &rpInfo);
+    pfn_vkCmdBeginRenderPass(cmd, &rpInfo, 0);
     pfn_vkCmdDrawIndexed(cmd, 3, 1, 0, 0, 0);
     pfn_vkCmdEndRenderPass(cmd);
     pfn_vkEndCommandBuffer(cmd);

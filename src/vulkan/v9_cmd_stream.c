@@ -181,7 +181,8 @@ int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd) {
     if (!cmd || !cmd->mem_bo) return -EINVAL;
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
-    v9_pack_frag_job((uint32_t *)(base_cpu + (cmd->frag_jc_gpu - cmd->mem_bo->gpu)), cmd->mfbd_gva);
+    v9_pack_frag_job((uint32_t *)(base_cpu + (cmd->frag_jc_gpu - cmd->mem_bo->gpu)),
+                     cmd->mfbd_gva, cmd->config.width, cmd->config.height);
     return 0;
 }
 
@@ -195,6 +196,30 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
     if (ret != 0 || event_code != 0x1) {
         fprintf(stderr, "v9_cmd_buffer_submit: TILER_JOB failed (ret=%d, event_code=0x%x)\n", ret, event_code);
         return -EIO;
+    }
+
+    if (getenv("PANVK_DUMP_TILER")) {
+        uint8_t *cpu = cmd->mem_bo->cpu;
+        uint32_t *ctx = (uint32_t *)(cpu + (cmd->tiler_ctx_gpu - cmd->mem_bo->gpu));
+        uint64_t *poly = (uint64_t *)(cpu + (cmd->polylist_gpu - cmd->mem_bo->gpu));
+        uint64_t *heap = (uint64_t *)(cpu + (cmd->tiler_heap_backing_gpu - cmd->mem_bo->gpu));
+        uint64_t *heap_desc = (uint64_t *)(cpu + (cmd->tiler_heap_desc_gpu - cmd->mem_bo->gpu));
+        fprintf(stderr, "TILER CTX:");
+        for (unsigned i = 0; i < 48; i++) fprintf(stderr, " %08x", ctx[i]);
+        fprintf(stderr, "\nPOLY:");
+        for (unsigned i = 0; i < 16; i++) fprintf(stderr, " %016llx", (unsigned long long)poly[i]);
+        fprintf(stderr, "\nHEAP base=%llx bottom=%llx top=%llx FIRST:",
+                (unsigned long long)heap_desc[1], (unsigned long long)heap_desc[2],
+                (unsigned long long)heap_desc[3]);
+        for (unsigned i = 0; i < 16; i++) fprintf(stderr, " %016llx", (unsigned long long)heap[i]);
+        fprintf(stderr, "\n");
+    }
+
+    if (getenv("PANVK_PATCH_TILER_STATE")) {
+        uint32_t *ctx = (uint32_t *)((uint8_t *)cmd->mem_bo->cpu +
+                                     (cmd->tiler_ctx_gpu - cmd->mem_bo->gpu));
+        ctx[33] = 31;
+        ctx[35] = 0x10000000u;
     }
 
     /* 2. Atom 1: Pre-Flush */

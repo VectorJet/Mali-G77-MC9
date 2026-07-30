@@ -159,6 +159,22 @@ struct VkExtent2D {
     uint32_t height;
 };
 
+struct VkExtent3D {
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+};
+
+struct VkOffset2D {
+    int32_t x;
+    int32_t y;
+};
+
+struct VkRect2D {
+    struct VkOffset2D offset;
+    struct VkExtent2D extent;
+};
+
 struct VkQueueFamilyProperties2 {
     uint32_t sType;
     void *pNext;
@@ -216,6 +232,30 @@ struct VkBufferCreateInfo {
     uint32_t sharingMode;
     uint32_t queueFamilyIndexCount;
     const uint32_t *pQueueFamilyIndices;
+};
+
+struct VkBufferCopy {
+    VkDeviceSize srcOffset;
+    VkDeviceSize dstOffset;
+    VkDeviceSize size;
+};
+
+struct VkImageCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t imageType;
+    uint32_t format;
+    struct VkExtent3D extent;
+    uint32_t mipLevels;
+    uint32_t arrayLayers;
+    uint32_t samples;
+    uint32_t tiling;
+    uint32_t usage;
+    uint32_t sharingMode;
+    uint32_t queueFamilyIndexCount;
+    const uint32_t *pQueueFamilyIndices;
+    uint32_t initialLayout;
 };
 
 struct VkShaderModuleCreateInfo {
@@ -316,15 +356,23 @@ struct VkPresentInfoKHR {
 struct VkRenderPassBeginInfo {
     uint32_t sType;
     const void *pNext;
-    struct VkExtent2D renderAreaExtent;
-    uint32_t clearColor;
+    VkRenderPass renderPass;
+    VkFramebuffer framebuffer;
+    struct VkRect2D renderArea;
+    uint32_t clearValueCount;
+    const void *pClearValues;
 };
 
 struct VkSubmitInfo {
     uint32_t sType;
     const void *pNext;
+    uint32_t waitSemaphoreCount;
+    const VkSemaphore *pWaitSemaphores;
+    const uint32_t *pWaitDstStageMask;
     uint32_t commandBufferCount;
     const VkCommandBuffer *pCommandBuffers;
+    uint32_t signalSemaphoreCount;
+    const VkSemaphore *pSignalSemaphores;
 };
 
 /* Core Vulkan Entry Points */
@@ -375,6 +423,13 @@ void vkDestroyBuffer(VkDevice device, VkBuffer buffer, void *pAllocator);
 void vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, struct VkMemoryRequirements *pMemoryRequirements);
 VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset);
 
+VkResult vkCreateImage(VkDevice device, const struct VkImageCreateInfo *pCreateInfo, void *pAllocator, VkImage *pImage);
+void vkDestroyImage(VkDevice device, VkImage image, void *pAllocator);
+void vkGetImageMemoryRequirements(VkDevice device, VkImage image, struct VkMemoryRequirements *pMemoryRequirements);
+VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
+VkResult vkCreateImageView(VkDevice device, const void *pCreateInfo, void *pAllocator, VkImageView *pView);
+void vkDestroyImageView(VkDevice device, VkImageView imageView, void *pAllocator);
+
 VkResult vkCreateShaderModule(VkDevice device, const struct VkShaderModuleCreateInfo *pCreateInfo, void *pAllocator, VkShaderModule *pShaderModule);
 void vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule, void *pAllocator);
 
@@ -409,6 +464,9 @@ void vkDestroySemaphore(VkDevice device, VkSemaphore semaphore, void *pAllocator
 
 VkResult vkCreateFence(VkDevice device, const void *pCreateInfo, void *pAllocator, VkFence *pFence);
 void vkDestroyFence(VkDevice device, VkFence fence, void *pAllocator);
+VkResult vkResetFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences);
+VkResult vkGetFenceStatus(VkDevice device, VkFence fence);
+VkResult vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences, uint32_t waitAll, uint64_t timeout);
 
 VkResult vkCreateCommandPool(VkDevice device, const struct VkCommandPoolCreateInfo *pCreateInfo, void *pAllocator, VkCommandPool *pCommandPool);
 void vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool, void *pAllocator);
@@ -425,14 +483,17 @@ void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint3
 void vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount, const uint32_t *pDynamicOffsets);
 void vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer *pBuffers, const VkDeviceSize *pOffsets);
 void vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t indexType);
+void vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, uint32_t regionCount, const struct VkBufferCopy *pRegions);
+void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask, uint32_t dstStageMask, uint32_t dependencyFlags, uint32_t memoryBarrierCount, const void *pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const void *pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const void *pImageMemoryBarriers);
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
 
-void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer, const struct VkRenderPassBeginInfo *pRenderPassBegin);
+void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer, const struct VkRenderPassBeginInfo *pRenderPassBegin, uint32_t contents);
 void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
 void vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
 
 VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmitInfo *pSubmits, void *fence);
 VkResult vkQueueWaitIdle(VkQueue queue);
+VkResult vkDeviceWaitIdle(VkDevice device);
 
 /* WSI & Surface Functions */
 VkResult vkCreateXlibSurfaceKHR(VkInstance instance, const struct VkXlibSurfaceCreateInfoKHR *pCreateInfo, void *pAllocator, VkSurfaceKHR *pSurface);
