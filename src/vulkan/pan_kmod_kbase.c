@@ -100,15 +100,24 @@ void pan_kmod_bo_free(struct pan_kmod_bo *bo) {
 
 int pan_kmod_submit_atom(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t core_req,
                          uint32_t atom_id, uint32_t *event_code) {
+    return pan_kmod_submit_atom_timeout(dev, jc_gpu, core_req, atom_id, event_code, -1);
+}
+
+int pan_kmod_submit_atom_timeout(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t core_req,
+                                 uint32_t atom_id, uint32_t *event_code, int timeout_ms) {
     if (!dev || !dev->kdev) return -EINVAL;
 
     int ret = kbase_submit_job(dev->kdev, jc_gpu, core_req, atom_id, 0, 0);
     if (ret < 0) return ret;
 
     uint32_t rx_atom = 0, rx_code = 0;
-    ret = kbase_wait_event(dev->kdev, &rx_atom, &rx_code);
-    if (ret < 0) return ret;
+    if (timeout_ms < 0) {
+        ret = kbase_wait_event(dev->kdev, &rx_atom, &rx_code);
+    } else {
+        ret = kbase_wait_event_timeout(dev->kdev, &rx_atom, &rx_code, timeout_ms);
+    }
 
     if (event_code) *event_code = rx_code;
-    return (rx_code == 0x1) ? 0 : -EIO;
+    if (ret == -EAGAIN) return 0; /* Timeout hit, job still queued/executing */
+    return (ret == 0 && rx_code == 0x1) ? 0 : -EIO;
 }

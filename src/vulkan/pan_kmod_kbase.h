@@ -48,6 +48,8 @@ void pan_kmod_bo_free(struct pan_kmod_bo *bo);
 
 int pan_kmod_submit_atom(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t core_req,
                          uint32_t atom_id, uint32_t *event_code);
+int pan_kmod_submit_atom_timeout(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t core_req,
+                                 uint32_t atom_id, uint32_t *event_code, int timeout_ms);
 
 #ifdef __cplusplus
 }
