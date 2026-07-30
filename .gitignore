@@ -1,2 +1,7 @@
 refs/
 mali-re-workspace/
+*.so
+*.o
+src/vulkan/panvk_v9_x11
+src/vulkan/test_*
+
