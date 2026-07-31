@@ -46,6 +46,11 @@ int main(int argc, char **argv) {
     typedef void (*PFN_vkFreeCommandBuffers)(VkDevice, VkCommandPool, uint32_t, const VkCommandBuffer *);
     typedef VkResult (*PFN_vkBeginCommandBuffer)(VkCommandBuffer, const struct VkCommandBufferBeginInfo *);
     typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
+    typedef VkResult (*PFN_vkCreateShaderModule)(VkDevice, const struct VkShaderModuleCreateInfo *, void *, VkShaderModule *);
+    typedef void (*PFN_vkDestroyShaderModule)(VkDevice, VkShaderModule, void *);
+    typedef VkResult (*PFN_vkCreateGraphicsPipelines)(VkDevice, VkPipelineCache, uint32_t, const struct VkGraphicsPipelineCreateInfo *, void *, VkPipeline *);
+    typedef void (*PFN_vkDestroyPipeline)(VkDevice, VkPipeline, void *);
+    typedef void (*PFN_vkCmdBindPipeline)(VkCommandBuffer, uint32_t, VkPipeline);
     typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const struct VkRenderPassBeginInfo *, uint32_t);
     typedef void (*PFN_vkCmdDrawIndexed)(VkCommandBuffer, uint32_t, uint32_t, uint32_t, int32_t, uint32_t);
     typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
@@ -65,6 +70,11 @@ int main(int argc, char **argv) {
     LOOKUP(PFN_vkFreeCommandBuffers, vkFreeCommandBuffers);
     LOOKUP(PFN_vkBeginCommandBuffer, vkBeginCommandBuffer);
     LOOKUP(PFN_vkEndCommandBuffer, vkEndCommandBuffer);
+    LOOKUP(PFN_vkCreateShaderModule, vkCreateShaderModule);
+    LOOKUP(PFN_vkDestroyShaderModule, vkDestroyShaderModule);
+    LOOKUP(PFN_vkCreateGraphicsPipelines, vkCreateGraphicsPipelines);
+    LOOKUP(PFN_vkDestroyPipeline, vkDestroyPipeline);
+    LOOKUP(PFN_vkCmdBindPipeline, vkCmdBindPipeline);
     LOOKUP(PFN_vkCmdBeginRenderPass, vkCmdBeginRenderPass);
     LOOKUP(PFN_vkCmdDrawIndexed, vkCmdDrawIndexed);
     LOOKUP(PFN_vkCmdEndRenderPass, vkCmdEndRenderPass);
@@ -72,7 +82,7 @@ int main(int argc, char **argv) {
     LOOKUP(PFN_panvk_v9_read_pixel, panvk_v9_read_pixel);
 #undef LOOKUP
 
-    printf("SUCCESS: Resolved all 18 Vulkan API functions via ICD proc address lookup\n");
+    printf("SUCCESS: Resolved Vulkan shader, pipeline, command, and device entry points\n");
 
     /* Create Instance */
     VkInstance instance = NULL;
@@ -94,7 +104,97 @@ int main(int argc, char **argv) {
     struct VkDeviceCreateInfo devInfo = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     pfn_vkCreateDevice(physDev, &devInfo, NULL, &device);
     VkQueue queue = NULL;
+    VkQueue same_queue = NULL;
     pfn_vkGetDeviceQueue(device, 0, 0, &queue);
+    pfn_vkGetDeviceQueue(device, 0, 0, &same_queue);
+    if (!queue || queue != same_queue) {
+        fprintf(stderr, "FAIL: repeated vkGetDeviceQueue returned different handles\n");
+        return 1;
+    }
+
+    /* Exercise SPIR-V entry-point discovery and graphics pipeline state parsing.
+     * These structurally valid modules are sufficient for the current front end;
+     * the native Valhall backend remains the fixed shader in v9_cmd_stream.c. */
+    static const uint32_t vertex_spirv[] = {
+        0x07230203, 0x00010000, 0, 2, 0,
+        0x0005000f, 0, 1, 0x6e69616d, 0,
+    };
+    static const uint32_t fragment_spirv[] = {
+        0x07230203, 0x00010000, 0, 2, 0,
+        0x0005000f, 4, 1, 0x6e69616d, 0,
+    };
+    struct VkShaderModuleCreateInfo shader_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof(vertex_spirv),
+        .pCode = vertex_spirv,
+    };
+    VkShaderModule vertex_shader = NULL;
+    VkShaderModule fragment_shader = NULL;
+    if (pfn_vkCreateShaderModule(device, &shader_info, NULL, &vertex_shader) != VK_SUCCESS) {
+        fprintf(stderr, "FAIL: vertex SPIR-V module rejected\n");
+        return 1;
+    }
+    shader_info.codeSize = sizeof(fragment_spirv);
+    shader_info.pCode = fragment_spirv;
+    if (pfn_vkCreateShaderModule(device, &shader_info, NULL, &fragment_shader) != VK_SUCCESS) {
+        fprintf(stderr, "FAIL: fragment SPIR-V module rejected\n");
+        return 1;
+    }
+
+    struct VkPipelineShaderStageCreateInfo stages[] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vertex_shader, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragment_shader, .pName = "main" },
+    };
+    struct VkPipelineInputAssemblyStateCreateInfo input_assembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    struct VkViewport viewport = { 0, 0, 16, 16, 0, 1 };
+    struct VkRect2D scissor = { .extent = { 16, 16 } };
+    struct VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &viewport,
+        .scissorCount = 1, .pScissors = &scissor,
+    };
+    struct VkPipelineRasterizationStateCreateInfo rasterization = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1,
+    };
+    struct VkPipelineMultisampleStateCreateInfo multisample = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    struct VkPipelineColorBlendAttachmentState blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    struct VkPipelineColorBlendStateCreateInfo blend = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1, .pAttachments = &blend_attachment,
+    };
+    struct VkGraphicsPipelineCreateInfo pipeline_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = stages,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState = &multisample,
+        .pColorBlendState = &blend,
+    };
+    VkPipeline pipeline = NULL;
+    if (pfn_vkCreateGraphicsPipelines(device, NULL, 1, &pipeline_info, NULL, &pipeline) != VK_SUCCESS) {
+        fprintf(stderr, "FAIL: graphics pipeline state creation failed\n");
+        return 1;
+    }
+    pfn_vkDestroyShaderModule(device, vertex_shader, NULL);
+    pfn_vkDestroyShaderModule(device, fragment_shader, NULL);
+    printf("SUCCESS: Parsed SPIR-V stages and graphics pipeline state\n");
 
     /* Allocate Command Buffer */
     VkCommandPool pool = NULL;
@@ -117,6 +217,7 @@ int main(int argc, char **argv) {
         .renderArea.extent = { .width = 16, .height = 16 },
     };
     pfn_vkCmdBeginRenderPass(cmd, &rpInfo, 0);
+    pfn_vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     pfn_vkCmdDrawIndexed(cmd, 3, 1, 0, 0, 0);
     pfn_vkCmdEndRenderPass(cmd);
     pfn_vkEndCommandBuffer(cmd);
@@ -141,6 +242,7 @@ int main(int argc, char **argv) {
     }
 
     pfn_vkFreeCommandBuffers(device, pool, 1, &cmd);
+    pfn_vkDestroyPipeline(device, pipeline, NULL);
     pfn_vkDestroyCommandPool(device, pool, NULL);
     pfn_vkDestroyDevice(device, NULL);
     pfn_vkDestroyInstance(instance, NULL);

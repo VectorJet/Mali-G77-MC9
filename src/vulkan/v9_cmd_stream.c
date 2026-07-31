@@ -22,6 +22,7 @@ static const uint8_t k_valhall_green_fs[] = {
 };
 
 struct v9_cmd_buffer {
+    unsigned refcount;
     struct pan_kmod_dev *dev;
     struct v9_render_target_config config;
     struct pan_kmod_bo *mem_bo;
@@ -60,6 +61,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     struct v9_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
     if (!cmd) return NULL;
 
+    cmd->refcount = 1;
     cmd->dev = dev;
     cmd->config = *config;
 
@@ -171,8 +173,14 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     return cmd;
 }
 
+struct v9_cmd_buffer *v9_cmd_buffer_ref(struct v9_cmd_buffer *cmd) {
+    if (cmd) cmd->refcount++;
+    return cmd;
+}
+
 void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd) {
     if (!cmd) return;
+    if (--cmd->refcount != 0) return;
     if (cmd->exec_bo)  pan_kmod_bo_free(cmd->exec_bo);
     if (cmd->color_bo) pan_kmod_bo_free(cmd->color_bo);
     if (cmd->mem_bo)   pan_kmod_bo_free(cmd->mem_bo);

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <xcb/xcb.h>
 
 #include "pan_kmod_kbase.h"
 #include "v9_cmd_stream.h"
@@ -23,6 +24,7 @@ extern "C" {
 #define VK_ERROR_INITIALIZATION_FAILED -3
 #define VK_ERROR_OUT_OF_HOST_MEMORY -1
 #define VK_ERROR_OUT_OF_DEVICE_MEMORY -2
+#define VK_ERROR_INVALID_SHADER_NV -1000012000
 #define VK_ERROR_SURFACE_LOST_KHR -1000000000
 #define VK_ERROR_NATIVE_WINDOW_IN_USE_KHR -1000000001
 
@@ -39,6 +41,16 @@ extern "C" {
 #define VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO 15
 #define VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO 16
 #define VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO 17
+#define VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO 18
+#define VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO 19
+#define VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO 20
+#define VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO 21
+#define VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO 22
+#define VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO 23
+#define VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO 24
+#define VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO 25
+#define VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO 26
+#define VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO 27
 #define VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO 30
 #define VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO 38
 #define VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO 37
@@ -75,6 +87,22 @@ extern "C" {
 #define VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR 0x00000001
 #define VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR 0x00000001
 #define VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT 0x00000010
+
+#define VK_PIPELINE_BIND_POINT_GRAPHICS 0
+#define VK_SHADER_STAGE_VERTEX_BIT 0x00000001
+#define VK_SHADER_STAGE_FRAGMENT_BIT 0x00000010
+#define VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST 3
+#define VK_POLYGON_MODE_FILL 0
+#define VK_CULL_MODE_NONE 0
+#define VK_FRONT_FACE_COUNTER_CLOCKWISE 1
+#define VK_COMPARE_OP_ALWAYS 7
+#define VK_SAMPLE_COUNT_1_BIT 0x00000001
+#define VK_COLOR_COMPONENT_R_BIT 0x00000001
+#define VK_COLOR_COMPONENT_G_BIT 0x00000002
+#define VK_COLOR_COMPONENT_B_BIT 0x00000004
+#define VK_COLOR_COMPONENT_A_BIT 0x00000008
+#define VK_DYNAMIC_STATE_VIEWPORT 0
+#define VK_DYNAMIC_STATE_SCISSOR 1
 
 typedef int VkResult;
 typedef uint64_t VkFlags;
@@ -175,6 +203,15 @@ struct VkRect2D {
     struct VkExtent2D extent;
 };
 
+struct VkViewport {
+    float x;
+    float y;
+    float width;
+    float height;
+    float minDepth;
+    float maxDepth;
+};
+
 struct VkQueueFamilyProperties2 {
     uint32_t sType;
     void *pNext;
@@ -264,6 +301,152 @@ struct VkShaderModuleCreateInfo {
     uint32_t flags;
     size_t codeSize;
     const uint32_t *pCode;
+};
+
+struct VkPipelineShaderStageCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t stage;
+    VkShaderModule module;
+    const char *pName;
+    const void *pSpecializationInfo;
+};
+
+struct VkVertexInputBindingDescription {
+    uint32_t binding;
+    uint32_t stride;
+    uint32_t inputRate;
+};
+
+struct VkVertexInputAttributeDescription {
+    uint32_t location;
+    uint32_t binding;
+    uint32_t format;
+    uint32_t offset;
+};
+
+struct VkPipelineVertexInputStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t vertexBindingDescriptionCount;
+    const struct VkVertexInputBindingDescription *pVertexBindingDescriptions;
+    uint32_t vertexAttributeDescriptionCount;
+    const struct VkVertexInputAttributeDescription *pVertexAttributeDescriptions;
+};
+
+struct VkPipelineInputAssemblyStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t topology;
+    uint32_t primitiveRestartEnable;
+};
+
+struct VkPipelineViewportStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t viewportCount;
+    const struct VkViewport *pViewports;
+    uint32_t scissorCount;
+    const struct VkRect2D *pScissors;
+};
+
+struct VkPipelineRasterizationStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t depthClampEnable;
+    uint32_t rasterizerDiscardEnable;
+    uint32_t polygonMode;
+    uint32_t cullMode;
+    uint32_t frontFace;
+    uint32_t depthBiasEnable;
+    float depthBiasConstantFactor;
+    float depthBiasClamp;
+    float depthBiasSlopeFactor;
+    float lineWidth;
+};
+
+struct VkPipelineMultisampleStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t rasterizationSamples;
+    uint32_t sampleShadingEnable;
+    float minSampleShading;
+    const uint32_t *pSampleMask;
+    uint32_t alphaToCoverageEnable;
+    uint32_t alphaToOneEnable;
+};
+
+struct VkPipelineDepthStencilStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t depthTestEnable;
+    uint32_t depthWriteEnable;
+    uint32_t depthCompareOp;
+    uint32_t depthBoundsTestEnable;
+    uint32_t stencilTestEnable;
+    uint8_t front[28];
+    uint8_t back[28];
+    float minDepthBounds;
+    float maxDepthBounds;
+};
+
+struct VkPipelineColorBlendAttachmentState {
+    uint32_t blendEnable;
+    uint32_t srcColorBlendFactor;
+    uint32_t dstColorBlendFactor;
+    uint32_t colorBlendOp;
+    uint32_t srcAlphaBlendFactor;
+    uint32_t dstAlphaBlendFactor;
+    uint32_t alphaBlendOp;
+    uint32_t colorWriteMask;
+};
+
+struct VkPipelineColorBlendStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t logicOpEnable;
+    uint32_t logicOp;
+    uint32_t attachmentCount;
+    const struct VkPipelineColorBlendAttachmentState *pAttachments;
+    float blendConstants[4];
+};
+
+struct VkPipelineDynamicStateCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t dynamicStateCount;
+    const uint32_t *pDynamicStates;
+};
+
+struct VkGraphicsPipelineCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t stageCount;
+    const struct VkPipelineShaderStageCreateInfo *pStages;
+    const struct VkPipelineVertexInputStateCreateInfo *pVertexInputState;
+    const struct VkPipelineInputAssemblyStateCreateInfo *pInputAssemblyState;
+    const void *pTessellationState;
+    const struct VkPipelineViewportStateCreateInfo *pViewportState;
+    const struct VkPipelineRasterizationStateCreateInfo *pRasterizationState;
+    const struct VkPipelineMultisampleStateCreateInfo *pMultisampleState;
+    const struct VkPipelineDepthStencilStateCreateInfo *pDepthStencilState;
+    const struct VkPipelineColorBlendStateCreateInfo *pColorBlendState;
+    const struct VkPipelineDynamicStateCreateInfo *pDynamicState;
+    VkPipelineLayout layout;
+    VkRenderPass renderPass;
+    uint32_t subpass;
+    VkPipeline basePipelineHandle;
+    int32_t basePipelineIndex;
 };
 
 struct VkCommandPoolCreateInfo {
@@ -455,7 +638,7 @@ VkResult vkAllocateDescriptorSets(VkDevice device, const void *pAllocateInfo, Vk
 VkResult vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets);
 void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const void *pDescriptorWrites, uint32_t descriptorCopyCount, const void *pDescriptorCopies);
 
-VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const void *pCreateInfos, void *pAllocator, VkPipeline *pPipelines);
+VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const struct VkGraphicsPipelineCreateInfo *pCreateInfos, void *pAllocator, VkPipeline *pPipelines);
 VkResult vkCreateComputePipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const void *pCreateInfos, void *pAllocator, VkPipeline *pPipelines);
 void vkDestroyPipeline(VkDevice device, VkPipeline pipeline, void *pAllocator);
 

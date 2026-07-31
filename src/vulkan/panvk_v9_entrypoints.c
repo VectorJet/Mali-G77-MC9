@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <X11/Xlib.h>
+#include <xcb/xcb.h>
 
 #include "panvk_v9_entrypoints.h"
 
@@ -32,11 +33,13 @@ struct VkDevice_T {
     uintptr_t loader_data;
     struct pan_kmod_dev *kdev;
     struct VkPhysicalDevice_T *phys_dev;
+    struct VkQueue_T *queue;
 };
 
 struct VkQueue_T {
     uintptr_t loader_data;
     struct VkDevice_T *device;
+    struct v9_cmd_buffer *last_v9_cmd;
 };
 
 struct VkCommandPool_T {
@@ -47,13 +50,20 @@ struct VkCommandBuffer_T {
     uintptr_t loader_data;
     struct VkDevice_T *device;
     struct v9_cmd_buffer *v9_cmd;
+    struct VkPipeline_T *graphics_pipeline;
+    struct VkViewport viewport;
+    struct VkRect2D scissor;
+    bool viewport_set;
+    bool scissor_set;
 };
 
 struct VkSurfaceKHR_T {
     Display *dpy;
-    Window window;
+    xcb_connection_t *connection;
+    uint32_t window;
     uint32_t width;
     uint32_t height;
+    bool is_xcb;
 };
 
 struct VkSwapchainKHR_T {
@@ -64,6 +74,7 @@ struct VkSwapchainKHR_T {
     uint32_t image_count;
     struct VkImage_T *images;
     GC gc;
+    xcb_gcontext_t xcb_gc;
     XImage *ximage;
     char *image_data;
 };
@@ -96,6 +107,7 @@ struct VkBuffer_T {
 struct VkShaderModule_T {
     size_t code_size;
     uint32_t *code;
+    uint32_t stage_mask;
 };
 
 struct VkPipelineLayout_T {
@@ -115,7 +127,26 @@ struct VkPipelineCache_T {
 };
 
 struct VkPipeline_T {
-    int dummy;
+    uint32_t stage_mask;
+    char vertex_entry_point[64];
+    char fragment_entry_point[64];
+    uint32_t topology;
+    bool primitive_restart;
+    struct VkViewport viewport;
+    struct VkRect2D scissor;
+    bool dynamic_viewport;
+    bool dynamic_scissor;
+    bool rasterizer_discard;
+    uint32_t polygon_mode;
+    uint32_t cull_mode;
+    uint32_t front_face;
+    float line_width;
+    uint32_t rasterization_samples;
+    bool depth_test;
+    bool depth_write;
+    uint32_t depth_compare_op;
+    bool blend_enable;
+    uint32_t color_write_mask;
 };
 
 struct VkDescriptorSetLayout_T {
@@ -387,16 +418,28 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
 }
 
 void vkDestroyDevice(VkDevice device, void *pAllocator) {
-    if (device) free(device);
+    if (!device) return;
+    if (device->queue) v9_cmd_buffer_destroy(device->queue->last_v9_cmd);
+    free(device->queue);
+    free(device);
 }
 
 void vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, VkQueue *pQueue) {
     if (!device || !pQueue) return;
-    struct VkQueue_T *queue = calloc(1, sizeof(*queue));
-    if (!queue) return;
-    set_loader_magic(queue);
-    queue->device = device;
-    *pQueue = queue;
+    if (queueFamilyIndex != 0 || queueIndex != 0) {
+        *pQueue = NULL;
+        return;
+    }
+    if (!device->queue) {
+        device->queue = calloc(1, sizeof(*device->queue));
+        if (!device->queue) {
+            *pQueue = NULL;
+            return;
+        }
+        set_loader_magic(device->queue);
+        device->queue->device = device;
+    }
+    *pQueue = device->queue;
 }
 
 /* Memory Allocation & Buffer Management */
@@ -506,19 +549,99 @@ void vkDestroyImageView(VkDevice device, VkImageView imageView, void *pAllocator
 }
 
 /* Shader Module & Pipeline Implementation */
+#define SPIRV_MAGIC 0x07230203u
+#define SPIRV_OP_ENTRY_POINT 15u
+
+static uint32_t spirv_execution_model_stage(uint32_t execution_model) {
+    switch (execution_model) {
+    case 0: return VK_SHADER_STAGE_VERTEX_BIT;
+    case 4: return VK_SHADER_STAGE_FRAGMENT_BIT;
+    default: return 0;
+    }
+}
+
+static bool spirv_string_equals(const uint32_t *words, size_t word_count,
+                                const char *expected) {
+    if (!expected) return false;
+    size_t expected_len = strlen(expected);
+    size_t max_len = word_count * sizeof(uint32_t);
+    const char *value = (const char *)words;
+    const char *end = memchr(value, '\0', max_len);
+    return end && (size_t)(end - value) == expected_len &&
+           memcmp(value, expected, expected_len) == 0;
+}
+
+static bool spirv_validate_and_scan(const uint32_t *code, size_t code_size,
+                                    uint32_t *stage_mask) {
+    if (!code || code_size < 5 * sizeof(uint32_t) ||
+        code_size % sizeof(uint32_t) != 0 || code[0] != SPIRV_MAGIC ||
+        code[1] > 0x00010600u || code[3] == 0 || code[4] != 0) {
+        return false;
+    }
+
+    size_t count = code_size / sizeof(uint32_t);
+    uint32_t stages = 0;
+    bool found_entry_point = false;
+    for (size_t offset = 5; offset < count;) {
+        uint32_t instruction = code[offset];
+        uint32_t word_count = instruction >> 16;
+        uint32_t opcode = instruction & 0xffffu;
+        if (word_count == 0 || word_count > count - offset) return false;
+        if (opcode == SPIRV_OP_ENTRY_POINT) {
+            if (word_count < 4) return false;
+            found_entry_point = true;
+            stages |= spirv_execution_model_stage(code[offset + 1]);
+            if (!memchr((const char *)&code[offset + 3], '\0',
+                        (word_count - 3) * sizeof(uint32_t))) {
+                return false;
+            }
+        }
+        offset += word_count;
+    }
+
+    if (stage_mask) *stage_mask = stages;
+    return found_entry_point;
+}
+
+static bool spirv_has_entry_point(VkShaderModule module, uint32_t stage,
+                                  const char *name) {
+    if (!module || !(module->stage_mask & stage) || !name) return false;
+    size_t count = module->code_size / sizeof(uint32_t);
+    for (size_t offset = 5; offset < count;) {
+        uint32_t instruction = module->code[offset];
+        uint32_t word_count = instruction >> 16;
+        uint32_t opcode = instruction & 0xffffu;
+        if (opcode == SPIRV_OP_ENTRY_POINT && word_count >= 4 &&
+            spirv_execution_model_stage(module->code[offset + 1]) == stage &&
+            spirv_string_equals(&module->code[offset + 3], word_count - 3, name)) {
+            return true;
+        }
+        offset += word_count;
+    }
+    return false;
+}
+
 VkResult vkCreateShaderModule(VkDevice device, const struct VkShaderModuleCreateInfo *pCreateInfo, void *pAllocator, VkShaderModule *pShaderModule) {
-    if (!pCreateInfo || !pShaderModule) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device || !pCreateInfo || !pShaderModule) return VK_ERROR_INITIALIZATION_FAILED;
+    *pShaderModule = NULL;
+
+    uint32_t stage_mask = 0;
+    if (!spirv_validate_and_scan(pCreateInfo->pCode, pCreateInfo->codeSize,
+                                 &stage_mask)) {
+        return VK_ERROR_INVALID_SHADER_NV;
+    }
 
     struct VkShaderModule_T *sm = calloc(1, sizeof(*sm));
     if (!sm) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-    if (pCreateInfo->pCode && pCreateInfo->codeSize > 0) {
-        sm->code_size = pCreateInfo->codeSize;
-        sm->code = malloc(sm->code_size);
-        if (sm->code) {
-            memcpy(sm->code, pCreateInfo->pCode, sm->code_size);
-        }
+    sm->code_size = pCreateInfo->codeSize;
+    sm->stage_mask = stage_mask;
+    sm->code = malloc(sm->code_size);
+    if (!sm->code) {
+        free(sm);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
+    memcpy(sm->code, pCreateInfo->pCode, sm->code_size);
 
     *pShaderModule = sm;
     return VK_SUCCESS;
@@ -614,10 +737,110 @@ VkResult vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, 
 void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const void *pDescriptorWrites, uint32_t descriptorCopyCount, const void *pDescriptorCopies) {
 }
 
-VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const void *pCreateInfos, void *pAllocator, VkPipeline *pPipelines) {
-    if (!pPipelines) return VK_ERROR_INITIALIZATION_FAILED;
+static bool pipeline_dynamic_state(const struct VkPipelineDynamicStateCreateInfo *dynamic,
+                                   uint32_t state) {
+    if (!dynamic || !dynamic->pDynamicStates) return false;
+    for (uint32_t i = 0; i < dynamic->dynamicStateCount; i++) {
+        if (dynamic->pDynamicStates[i] == state) return true;
+    }
+    return false;
+}
+
+static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
+                                             const struct VkGraphicsPipelineCreateInfo *info) {
+    if (!info->pStages || info->stageCount == 0) return VK_ERROR_INVALID_SHADER_NV;
+
+    for (uint32_t i = 0; i < info->stageCount; i++) {
+        const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
+        if ((stage->stage != VK_SHADER_STAGE_VERTEX_BIT &&
+             stage->stage != VK_SHADER_STAGE_FRAGMENT_BIT) ||
+            !spirv_has_entry_point(stage->module, stage->stage, stage->pName)) {
+            return VK_ERROR_INVALID_SHADER_NV;
+        }
+        if (pipeline->stage_mask & stage->stage) return VK_ERROR_INVALID_SHADER_NV;
+
+        pipeline->stage_mask |= stage->stage;
+        if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) {
+            snprintf(pipeline->vertex_entry_point,
+                     sizeof(pipeline->vertex_entry_point), "%s", stage->pName);
+        } else {
+            snprintf(pipeline->fragment_entry_point,
+                     sizeof(pipeline->fragment_entry_point), "%s", stage->pName);
+        }
+    }
+
+    return (pipeline->stage_mask & VK_SHADER_STAGE_VERTEX_BIT) ?
+           VK_SUCCESS : VK_ERROR_INVALID_SHADER_NV;
+}
+
+static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
+                                       const struct VkGraphicsPipelineCreateInfo *info) {
+    pipeline->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipeline->polygon_mode = VK_POLYGON_MODE_FILL;
+    pipeline->cull_mode = VK_CULL_MODE_NONE;
+    pipeline->front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    pipeline->line_width = 1.0f;
+    pipeline->rasterization_samples = VK_SAMPLE_COUNT_1_BIT;
+    pipeline->depth_compare_op = VK_COMPARE_OP_ALWAYS;
+    pipeline->color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    if (info->pInputAssemblyState) {
+        pipeline->topology = info->pInputAssemblyState->topology;
+        pipeline->primitive_restart = info->pInputAssemblyState->primitiveRestartEnable != 0;
+    }
+    if (info->pViewportState) {
+        if (info->pViewportState->viewportCount && info->pViewportState->pViewports)
+            pipeline->viewport = info->pViewportState->pViewports[0];
+        if (info->pViewportState->scissorCount && info->pViewportState->pScissors)
+            pipeline->scissor = info->pViewportState->pScissors[0];
+    }
+    pipeline->dynamic_viewport = pipeline_dynamic_state(info->pDynamicState,
+                                                        VK_DYNAMIC_STATE_VIEWPORT);
+    pipeline->dynamic_scissor = pipeline_dynamic_state(info->pDynamicState,
+                                                       VK_DYNAMIC_STATE_SCISSOR);
+    if (info->pRasterizationState) {
+        pipeline->rasterizer_discard = info->pRasterizationState->rasterizerDiscardEnable != 0;
+        pipeline->polygon_mode = info->pRasterizationState->polygonMode;
+        pipeline->cull_mode = info->pRasterizationState->cullMode;
+        pipeline->front_face = info->pRasterizationState->frontFace;
+        pipeline->line_width = info->pRasterizationState->lineWidth;
+    }
+    if (info->pMultisampleState)
+        pipeline->rasterization_samples = info->pMultisampleState->rasterizationSamples;
+    if (info->pDepthStencilState) {
+        pipeline->depth_test = info->pDepthStencilState->depthTestEnable != 0;
+        pipeline->depth_write = info->pDepthStencilState->depthWriteEnable != 0;
+        pipeline->depth_compare_op = info->pDepthStencilState->depthCompareOp;
+    }
+    if (info->pColorBlendState && info->pColorBlendState->attachmentCount &&
+        info->pColorBlendState->pAttachments) {
+        pipeline->blend_enable = info->pColorBlendState->pAttachments[0].blendEnable != 0;
+        pipeline->color_write_mask = info->pColorBlendState->pAttachments[0].colorWriteMask;
+    }
+}
+
+VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache,
+                                   uint32_t createInfoCount,
+                                   const struct VkGraphicsPipelineCreateInfo *pCreateInfos,
+                                   void *pAllocator, VkPipeline *pPipelines) {
+    if (!device || !pCreateInfos || !pPipelines) return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t i = 0; i < createInfoCount; i++) pPipelines[i] = NULL;
+
     for (uint32_t i = 0; i < createInfoCount; i++) {
         struct VkPipeline_T *pipe = calloc(1, sizeof(*pipe));
+        if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+        VkResult result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
+        if (result != VK_SUCCESS) {
+            free(pipe);
+            for (uint32_t j = 0; j < i; j++) {
+                free(pPipelines[j]);
+                pPipelines[j] = NULL;
+            }
+            return result;
+        }
+        pipeline_parse_fixed_state(pipe, &pCreateInfos[i]);
         pPipelines[i] = pipe;
     }
     return VK_SUCCESS;
@@ -724,16 +947,37 @@ void vkFreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t c
 
 VkResult vkBeginCommandBuffer(VkCommandBuffer commandBuffer, const struct VkCommandBufferBeginInfo *pBeginInfo) {
     if (!commandBuffer) return VK_ERROR_INITIALIZATION_FAILED;
+    commandBuffer->graphics_pipeline = NULL;
+    commandBuffer->viewport_set = false;
+    commandBuffer->scissor_set = false;
     return VK_SUCCESS;
 }
 
 void vkCmdBindPipeline(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipeline pipeline) {
+    if (!commandBuffer || pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
+    commandBuffer->graphics_pipeline = pipeline;
+    if (pipeline) {
+        if (!pipeline->dynamic_viewport) {
+            commandBuffer->viewport = pipeline->viewport;
+            commandBuffer->viewport_set = true;
+        }
+        if (!pipeline->dynamic_scissor) {
+            commandBuffer->scissor = pipeline->scissor;
+            commandBuffer->scissor_set = true;
+        }
+    }
 }
 
 void vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport, uint32_t viewportCount, const void *pViewports) {
+    if (!commandBuffer || firstViewport != 0 || viewportCount == 0 || !pViewports) return;
+    commandBuffer->viewport = ((const struct VkViewport *)pViewports)[0];
+    commandBuffer->viewport_set = true;
 }
 
 void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint32_t scissorCount, const void *pScissors) {
+    if (!commandBuffer || firstScissor != 0 || scissorCount == 0 || !pScissors) return;
+    commandBuffer->scissor = ((const struct VkRect2D *)pScissors)[0];
+    commandBuffer->scissor_set = true;
 }
 
 void vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount, const uint32_t *pDynamicOffsets) {
@@ -815,7 +1059,9 @@ void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask,
 }
 
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
-    if (commandBuffer && commandBuffer->v9_cmd) {
+    if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
+        (!commandBuffer->graphics_pipeline ||
+         !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
     }
 }
@@ -841,7 +1087,9 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
 }
 
 void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
-    if (commandBuffer && commandBuffer->v9_cmd) {
+    if (commandBuffer && commandBuffer->v9_cmd && indexCount > 0 && instanceCount > 0 &&
+        (!commandBuffer->graphics_pipeline ||
+         !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
     }
 }
@@ -864,6 +1112,10 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
         for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
             VkCommandBuffer cmd = pSubmits[s].pCommandBuffers[cb];
             if (cmd && cmd->v9_cmd) {
+                if (queue->last_v9_cmd != cmd->v9_cmd) {
+                    v9_cmd_buffer_destroy(queue->last_v9_cmd);
+                    queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
+                }
                 int ret = v9_cmd_buffer_submit(cmd->v9_cmd);
                 if (ret != 0) return VK_ERROR_INITIALIZATION_FAILED;
             }
@@ -911,9 +1163,21 @@ VkResult vkCreateXcbSurfaceKHR(VkInstance instance, const struct VkXcbSurfaceCre
     struct VkSurfaceKHR_T *surf = calloc(1, sizeof(*surf));
     if (!surf) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-    surf->window = (unsigned long)pCreateInfo->window;
+    surf->connection = (xcb_connection_t *)pCreateInfo->connection;
+    surf->window = (uint32_t)pCreateInfo->window;
+    surf->is_xcb = true;
     surf->width = 800;
     surf->height = 600;
+
+    if (surf->connection && surf->window) {
+        xcb_get_geometry_cookie_t cookie = xcb_get_geometry(surf->connection, surf->window);
+        xcb_get_geometry_reply_t *reply = xcb_get_geometry_reply(surf->connection, cookie, NULL);
+        if (reply) {
+            surf->width = reply->width;
+            surf->height = reply->height;
+            free(reply);
+        }
+    }
 
     *pSurface = surf;
     return VK_SUCCESS;
@@ -1036,7 +1300,11 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
         sc->images[i].index = i;
     }
 
-    if (sc->surface && sc->surface->dpy && sc->surface->window) {
+    if (sc->surface && sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
+        sc->xcb_gc = xcb_generate_id(sc->surface->connection);
+        xcb_create_gc(sc->surface->connection, sc->xcb_gc, sc->surface->window, 0, NULL);
+        sc->image_data = malloc(sc->width * sc->height * 4);
+    } else if (sc->surface && sc->surface->dpy && sc->surface->window) {
         int screen = DefaultScreen(sc->surface->dpy);
         sc->gc = XCreateGC(sc->surface->dpy, sc->surface->window, 0, NULL);
         sc->image_data = malloc(sc->width * sc->height * 4);
@@ -1053,9 +1321,12 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
 void vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, void *pAllocator) {
     if (!swapchain) return;
     if (swapchain->images) free(swapchain->images);
-    if (swapchain->surface && swapchain->surface->dpy) {
-        if (swapchain->gc) XFreeGC(swapchain->surface->dpy, swapchain->gc);
+    if (swapchain->surface && swapchain->surface->is_xcb && swapchain->surface->connection && swapchain->xcb_gc) {
+        xcb_free_gc(swapchain->surface->connection, swapchain->xcb_gc);
+    } else if (swapchain->surface && swapchain->surface->dpy && swapchain->gc) {
+        XFreeGC(swapchain->surface->dpy, swapchain->gc);
     }
+    if (swapchain->image_data) free(swapchain->image_data);
     free(swapchain);
 }
 
@@ -1086,9 +1357,26 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
     if (!pPresentInfo || pPresentInfo->swapchainCount == 0) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkSwapchainKHR sc = pPresentInfo->pSwapchains[0];
-    if (sc && sc->surface && sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {
-        XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
-        XFlush(sc->surface->dpy);
+    if (sc && sc->surface && sc->image_data) {
+        struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
+        if (last_cmd) {
+            uint32_t *dst = (uint32_t *)sc->image_data;
+            for (uint32_t y = 0; y < sc->height; y++) {
+                for (uint32_t x = 0; x < sc->width; x++) {
+                    dst[y * sc->width + x] = v9_cmd_buffer_read_pixel(last_cmd, x, y);
+                }
+            }
+        }
+        if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
+            xcb_put_image(sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                          sc->surface->window, sc->xcb_gc,
+                          sc->width, sc->height, 0, 0, 0, 24,
+                          sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
+            xcb_flush(sc->surface->connection);
+        } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {
+            XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
+            XFlush(sc->surface->dpy);
+        }
     }
     return VK_SUCCESS;
 }
