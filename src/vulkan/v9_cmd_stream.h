@@ -45,6 +45,8 @@ struct v9_cmd_buffer *v9_cmd_buffer_ref(struct v9_cmd_buffer *cmd);
 void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd);
 
 int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd);
+int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
+                                     const struct panvk_v9_compiled_shader *shader);
 int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
                                       const struct panvk_v9_compiled_shader *shader);
 int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,

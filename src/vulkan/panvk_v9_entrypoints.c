@@ -1380,11 +1380,17 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         command_buffer_apply_ubos(commandBuffer);
         command_buffer_apply_attributes(commandBuffer);
-        if (commandBuffer->graphics_pipeline &&
-            commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
-            v9_cmd_buffer_set_fragment_shader(
-                commandBuffer->v9_cmd,
-                &commandBuffer->graphics_pipeline->fragment_binary);
+        if (commandBuffer->graphics_pipeline) {
+            if (commandBuffer->graphics_pipeline->vertex_binary.binary_size) {
+                v9_cmd_buffer_set_vertex_shader(
+                    commandBuffer->v9_cmd,
+                    &commandBuffer->graphics_pipeline->vertex_binary);
+            }
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+                v9_cmd_buffer_set_fragment_shader(
+                    commandBuffer->v9_cmd,
+                    &commandBuffer->graphics_pipeline->fragment_binary);
+            }
         }
         uint64_t pos_gpu = commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo ?
                            commandBuffer->vertex_bindings[0].buffer->bo->gpu +
@@ -1431,11 +1437,17 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         command_buffer_apply_ubos(commandBuffer);
         command_buffer_apply_attributes(commandBuffer);
-        if (commandBuffer->graphics_pipeline &&
-            commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
-            v9_cmd_buffer_set_fragment_shader(
-                commandBuffer->v9_cmd,
-                &commandBuffer->graphics_pipeline->fragment_binary);
+        if (commandBuffer->graphics_pipeline) {
+            if (commandBuffer->graphics_pipeline->vertex_binary.binary_size) {
+                v9_cmd_buffer_set_vertex_shader(
+                    commandBuffer->v9_cmd,
+                    &commandBuffer->graphics_pipeline->vertex_binary);
+            }
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+                v9_cmd_buffer_set_fragment_shader(
+                    commandBuffer->v9_cmd,
+                    &commandBuffer->graphics_pipeline->fragment_binary);
+            }
         }
         uint64_t pos_gpu = commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo ?
                            commandBuffer->vertex_bindings[0].buffer->bo->gpu +

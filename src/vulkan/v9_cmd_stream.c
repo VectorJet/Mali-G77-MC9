@@ -217,6 +217,15 @@ int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd) {
     return 0;
 }
 
+int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
+                                     const struct panvk_v9_compiled_shader *shader) {
+    if (!cmd || !cmd->mem_bo || !shader || !shader->binary ||
+        !shader->binary_size || (shader->binary_size & 7)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
 int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
                                       const struct panvk_v9_compiled_shader *shader) {
     if (!cmd || !cmd->mem_bo || !shader || !shader->binary ||
