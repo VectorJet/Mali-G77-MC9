@@ -27,6 +27,7 @@ struct v9_cmd_buffer {
     struct v9_render_target_config config;
     struct pan_kmod_bo *mem_bo;
     struct pan_kmod_bo *exec_bo;
+    struct pan_kmod_bo *exec_vs_bo;
     struct pan_kmod_bo *color_bo;
 
     uint64_t mfbd_gva;
@@ -35,7 +36,10 @@ struct v9_cmd_buffer {
     uint64_t sampleloc_gpu;
     uint64_t dcd_gpu;
     uint64_t sp_gpu;
+    uint64_t sp_vertex_gpu;
     uint64_t isa_gpu;
+    uint64_t isa_vertex_gpu;
+    bool has_vertex_shader;
     uint64_t res_gpu;
     uint64_t ubo_gpu;
     uint64_t attr_buf_gpu;
@@ -108,6 +112,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     cmd->sampleloc_gpu            = base_gva + 0xB100;
     cmd->dcd_gpu                  = base_gva + 0xC100;
     cmd->sp_gpu                   = base_gva + 0xCC00;
+    cmd->sp_vertex_gpu            = base_gva + 0xCD00;
     cmd->isa_gpu                  = cmd->exec_bo->gpu;
     cmd->res_gpu                  = base_gva + 0xD200;
     cmd->ubo_gpu                  = base_gva + 0xD300;
@@ -188,9 +193,10 @@ struct v9_cmd_buffer *v9_cmd_buffer_ref(struct v9_cmd_buffer *cmd) {
 void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd) {
     if (!cmd) return;
     if (--cmd->refcount != 0) return;
-    if (cmd->exec_bo)  pan_kmod_bo_free(cmd->exec_bo);
-    if (cmd->color_bo) pan_kmod_bo_free(cmd->color_bo);
-    if (cmd->mem_bo)   pan_kmod_bo_free(cmd->mem_bo);
+    if (cmd->exec_bo)    pan_kmod_bo_free(cmd->exec_bo);
+    if (cmd->exec_vs_bo) pan_kmod_bo_free(cmd->exec_vs_bo);
+    if (cmd->color_bo)   pan_kmod_bo_free(cmd->color_bo);
+    if (cmd->mem_bo)     pan_kmod_bo_free(cmd->mem_bo);
     free(cmd);
 }
 
@@ -223,6 +229,24 @@ int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
         !shader->binary_size || (shader->binary_size & 7)) {
         return -EINVAL;
     }
+
+    if (!cmd->exec_vs_bo || shader->binary_size > cmd->exec_vs_bo->size) {
+        if (cmd->exec_vs_bo) pan_kmod_bo_free(cmd->exec_vs_bo);
+        struct pan_kmod_bo *new_bo = pan_kmod_bo_alloc(
+            cmd->dev, shader->binary_size,
+            PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE | PAN_KMOD_BO_FLAG_EXEC);
+        if (!new_bo) return -ENOMEM;
+        cmd->exec_vs_bo = new_bo;
+        cmd->isa_vertex_gpu = new_bo->gpu;
+    }
+
+    memcpy(cmd->exec_vs_bo->cpu, shader->binary, shader->binary_size);
+    uint8_t *base_cpu = cmd->mem_bo->cpu;
+    v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_vertex_gpu - cmd->mem_bo->gpu)),
+                           cmd->isa_vertex_gpu, shader->work_reg_count, shader->preload,
+                           true, shader->contains_barrier,
+                           shader->ftz_fp16, shader->ftz_fp32);
+    cmd->has_vertex_shader = true;
     return 0;
 }
 
@@ -312,7 +336,7 @@ int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
                       cmd->config.width, cmd->config.height,
                       cmd->tiler_ctx_gpu, idx_gpu, pos_gpu,
                       cmd->depth_gpu, cmd->blend_gpu, cmd->res_gpu,
-                      cmd->sp_gpu, cmd->tls_gpu,
+                      cmd->sp_gpu, (cmd->has_vertex_shader ? cmd->sp_vertex_gpu : 0), cmd->tls_gpu,
                       index_count, index_type, vertex_count);
     return 0;
 }

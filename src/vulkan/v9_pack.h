@@ -147,11 +147,11 @@ static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend
 static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t height,
                                       uint64_t tiler_ctx_gpu, uint64_t idx_gpu, uint64_t pos_gpu,
                                       uint64_t depth_gpu, uint64_t blend_gpu, uint64_t res_gpu,
-                                      uint64_t sp_gpu, uint64_t tls_gpu,
+                                      uint64_t sp_gpu, uint64_t sp_vertex_gpu, uint64_t tls_gpu,
                                       uint32_t index_count, uint32_t index_type,
                                       uint32_t vertex_count) {
-    memset(vt, 0, 256);
-    vt[4] = (1u << 0) | (7u << 1); /* Type = 7 (TILER_JOB) */
+    memset(vt, 0, 384);
+    vt[4] = sp_vertex_gpu ? ((1u << 0) | (6u << 1)) : ((1u << 0) | (7u << 1)); /* Type = 6 (MALLOC_VERTEX_JOB) or 7 (TILER_JOB) */
     pack_u64(vt + 6, 0);           /* Next = 0 */
     vt[8] = (index_type == 1 ? 0x3C008 : 0x38008); /* Triangles + Index Type U32/U16 */
     vt[9] = 0x00008100;
@@ -183,6 +183,22 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     pack_u64(se + 10, sp_gpu);
     pack_u64(se + 12, tls_gpu);
     pack_u64(se + 14, 0);
+
+    if (sp_vertex_gpu) {
+        uint32_t *pos_se = vt + 64; /* Position Shader Environment at offset 256 */
+        pos_se[0] = 0;
+        pos_se[1] = 0;
+        pack_u64(pos_se + 8, 1ULL | res_gpu);
+        pack_u64(pos_se + 10, sp_vertex_gpu);
+        pack_u64(pos_se + 12, tls_gpu);
+
+        uint32_t *var_se = vt + 80; /* Varying Shader Environment at offset 320 */
+        var_se[0] = 0;
+        var_se[1] = 0;
+        pack_u64(var_se + 8, 1ULL | res_gpu);
+        pack_u64(var_se + 10, sp_vertex_gpu);
+        pack_u64(var_se + 12, tls_gpu);
+    }
 }
 
 static inline void v9_pack_frag_job_chain(uint32_t *fj1, uint32_t *fj2,
