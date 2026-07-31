@@ -1354,11 +1354,32 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
     v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
 }
 
+static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
+    struct v9_attribute_binding attrs[8];
+    uint32_t attr_count = 0;
+    for (uint32_t i = 0; i < 16 && attr_count < 8; i++) {
+        if (!commandBuffer->vertex_bindings[i].buffer ||
+            !commandBuffer->vertex_bindings[i].buffer->bo)
+            continue;
+        VkBuffer buf = commandBuffer->vertex_bindings[i].buffer;
+        VkDeviceSize offset = commandBuffer->vertex_bindings[i].offset;
+        attrs[attr_count++] = (struct v9_attribute_binding) {
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = 0,
+            .stride = 16,
+            .buffer_address = buf->bo->gpu + buf->memory_offset + offset,
+            .buffer_size = (buf->size > offset) ? (uint32_t)(buf->size - offset) : 0,
+        };
+    }
+    v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
+}
+
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
     if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         command_buffer_apply_ubos(commandBuffer);
+        command_buffer_apply_attributes(commandBuffer);
         if (commandBuffer->graphics_pipeline &&
             commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
             v9_cmd_buffer_set_fragment_shader(
@@ -1379,10 +1400,20 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
                           uint32_t contents) {
     if (!commandBuffer || !pRenderPassBegin) return;
 
+    uint32_t clear_color = 0;
+    if (pRenderPassBegin->clearValueCount > 0 && pRenderPassBegin->pClearValues) {
+        const float *c = (const float *)pRenderPassBegin->pClearValues;
+        uint8_t r = (uint8_t)(c[0] * 255.0f);
+        uint8_t g = (uint8_t)(c[1] * 255.0f);
+        uint8_t b = (uint8_t)(c[2] * 255.0f);
+        uint8_t a = (uint8_t)(c[3] * 255.0f);
+        clear_color = (a << 24) | (b << 16) | (g << 8) | r;
+    }
+
     struct v9_render_target_config config = {
         .width = pRenderPassBegin->renderArea.extent.width > 0 ? pRenderPassBegin->renderArea.extent.width : 300,
         .height = pRenderPassBegin->renderArea.extent.height > 0 ? pRenderPassBegin->renderArea.extent.height : 300,
-        .clear_color = 0,
+        .clear_color = clear_color,
     };
 
     if (commandBuffer->v9_cmd) {
@@ -1399,6 +1430,7 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
         command_buffer_apply_ubos(commandBuffer);
+        command_buffer_apply_attributes(commandBuffer);
         if (commandBuffer->graphics_pipeline &&
             commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
             v9_cmd_buffer_set_fragment_shader(

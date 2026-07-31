@@ -282,6 +282,7 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
     result->contains_barrier = info.contains_barrier;
     result->ftz_fp16 = info.ftz_fp16;
     result->ftz_fp32 = info.ftz_fp32;
+    result->outputs_written = info.outputs_written;
     if (stage == PANVK_V9_SHADER_FRAGMENT) {
         result->writes_depth = info.fs.writes_depth;
         result->writes_stencil = info.fs.writes_stencil;

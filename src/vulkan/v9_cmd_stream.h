@@ -31,6 +31,14 @@ struct v9_ubo_binding {
     uint32_t index;
 };
 
+struct v9_attribute_binding {
+    uint32_t format;
+    uint32_t offset;
+    uint32_t stride;
+    uint64_t buffer_address;
+    uint32_t buffer_size;
+};
+
 struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
                                            const struct v9_render_target_config *config);
 struct v9_cmd_buffer *v9_cmd_buffer_ref(struct v9_cmd_buffer *cmd);
@@ -42,6 +50,9 @@ int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
 int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
                            const struct v9_ubo_binding *bindings,
                            uint32_t binding_count);
+int v9_cmd_buffer_set_attributes(struct v9_cmd_buffer *cmd,
+                                 const struct v9_attribute_binding *bindings,
+                                 uint32_t binding_count);
 int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd);
 int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
                         uint64_t idx_gpu, uint32_t index_count, uint32_t index_type,

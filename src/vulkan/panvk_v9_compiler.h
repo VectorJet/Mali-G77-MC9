@@ -28,6 +28,7 @@ struct panvk_v9_compiled_shader {
     bool can_discard;
     bool ftz_fp16;
     bool ftz_fp32;
+    uint64_t outputs_written;
 };
 
 struct panvk_v9_descriptor_binding {
