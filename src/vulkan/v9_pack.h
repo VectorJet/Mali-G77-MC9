@@ -64,10 +64,13 @@ static inline void v9_pack_buffer(uint32_t *buffer, uint64_t address, uint32_t s
     pack_u64(buffer + 2, address);
 }
 
+#define MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX   0u
+#define MALI_ATTRIBUTE_DIVISOR_RATE_INSTANCE 1u
+
 static inline void v9_pack_attribute(uint32_t *attr, uint32_t format, uint32_t table, uint32_t offset, uint32_t buffer_index, uint32_t stride) {
     memset(attr, 0, 32);
     attr[0] = (5u << 0) | (0u << 4) | (1u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Offset enable=1 */
-    attr[1] = (table & 0x3Fu) | (0u << 6); /* Table (1=Attribute Buffer), Frequency=0 (Vertex) */
+    attr[1] = (table & 0x3Fu) | (MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX << 6); /* Table (1=Attribute Buffer), Explicit Per-Vertex Frequency */
     attr[2] = offset;
     attr[3] = buffer_index;
     attr[4] = stride;
