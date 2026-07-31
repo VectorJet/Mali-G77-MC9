@@ -6,6 +6,7 @@
 #ifndef V9_PACK_H
 #define V9_PACK_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -42,10 +43,17 @@ static inline void v9_pack_depth(uint32_t *zs) {
     zs[4] = (1u << 22) | (7u << 29);
 }
 
-static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu) {
+static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu,
+                                          uint32_t work_reg_count, uint64_t preload,
+                                          bool primary_shader, bool contains_barrier,
+                                          bool ftz_fp16, bool ftz_fp32) {
     memset(sp, 0, 16);
-    sp[0] = (8u << 0) | (2u << 4) | (1u << 8) | (1u << 28) | (2u << 30);
-    sp[1] = 0;
+    uint32_t register_allocation = work_reg_count <= 32 ? 2u : 0u;
+    uint32_t ftz_mode = ftz_fp32 ? (ftz_fp16 ? 2u : 1u) : 0u;
+    sp[0] = (8u << 0) | (2u << 4) |
+            ((uint32_t)primary_shader << 8) | (ftz_mode << 17) |
+            ((uint32_t)contains_barrier << 28) | (register_allocation << 30);
+    sp[1] = (uint32_t)(preload >> 48);
     pack_u64(sp + 2, isa_gpu);
 }
 

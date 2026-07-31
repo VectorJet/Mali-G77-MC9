@@ -11,6 +11,29 @@
 
 typedef PFN_vkVoidFunction (*PFN_vk_icdGetInstanceProcAddr)(VkInstance instance, const char *pName);
 
+static uint32_t *read_spirv(const char *path, size_t *size) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return NULL;
+    if (fseek(file, 0, SEEK_END)) {
+        fclose(file);
+        return NULL;
+    }
+    long file_size = ftell(file);
+    if (file_size <= 0 || (file_size & 3) || fseek(file, 0, SEEK_SET)) {
+        fclose(file);
+        return NULL;
+    }
+    uint32_t *code = malloc((size_t)file_size);
+    if (!code || fread(code, 1, (size_t)file_size, file) != (size_t)file_size) {
+        free(code);
+        code = NULL;
+    } else {
+        *size = (size_t)file_size;
+    }
+    fclose(file);
+    return code;
+}
+
 int main(int argc, char **argv) {
     printf("=== Testing Step 4: Vulkan Loader ICD Shared Library Integration ===\n");
 
@@ -113,8 +136,8 @@ int main(int argc, char **argv) {
     }
 
     /* Exercise SPIR-V entry-point discovery and graphics pipeline state parsing.
-     * These structurally valid modules are sufficient for the current front end;
-     * the native Valhall backend remains the fixed shader in v9_cmd_stream.c. */
+     * With no arguments these structural modules exercise the fixed fallback;
+     * pass vertex and fragment SPIR-V paths to exercise native compilation. */
     static const uint32_t vertex_spirv[] = {
         0x07230203, 0x00010000, 0, 2, 0,
         0x0005000f, 0, 1, 0x6e69616d, 0,
@@ -123,10 +146,24 @@ int main(int argc, char **argv) {
         0x07230203, 0x00010000, 0, 2, 0,
         0x0005000f, 4, 1, 0x6e69616d, 0,
     };
+    size_t vertex_code_size = sizeof(vertex_spirv);
+    size_t fragment_code_size = sizeof(fragment_spirv);
+    uint32_t *vertex_code = NULL;
+    uint32_t *fragment_code = NULL;
+    if (argc == 3) {
+        vertex_code = read_spirv(argv[1], &vertex_code_size);
+        fragment_code = read_spirv(argv[2], &fragment_code_size);
+        if (!vertex_code || !fragment_code) {
+            fprintf(stderr, "FAIL: could not read SPIR-V test files\n");
+            free(vertex_code);
+            free(fragment_code);
+            return 1;
+        }
+    }
     struct VkShaderModuleCreateInfo shader_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = sizeof(vertex_spirv),
-        .pCode = vertex_spirv,
+        .codeSize = vertex_code_size,
+        .pCode = vertex_code ? vertex_code : vertex_spirv,
     };
     VkShaderModule vertex_shader = NULL;
     VkShaderModule fragment_shader = NULL;
@@ -134,12 +171,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "FAIL: vertex SPIR-V module rejected\n");
         return 1;
     }
-    shader_info.codeSize = sizeof(fragment_spirv);
-    shader_info.pCode = fragment_spirv;
+    shader_info.codeSize = fragment_code_size;
+    shader_info.pCode = fragment_code ? fragment_code : fragment_spirv;
     if (pfn_vkCreateShaderModule(device, &shader_info, NULL, &fragment_shader) != VK_SUCCESS) {
         fprintf(stderr, "FAIL: fragment SPIR-V module rejected\n");
         return 1;
     }
+    free(vertex_code);
+    free(fragment_code);
 
     struct VkPipelineShaderStageCreateInfo stages[] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,

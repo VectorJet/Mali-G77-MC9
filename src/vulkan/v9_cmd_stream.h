@@ -11,6 +11,7 @@
 #include <stddef.h>
 
 #include "pan_kmod_kbase.h"
+#include "panvk_v9_compiler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,8 @@ struct v9_cmd_buffer *v9_cmd_buffer_ref(struct v9_cmd_buffer *cmd);
 void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd);
 
 int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd);
+int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
+                                      const struct panvk_v9_compiled_shader *shader);
 int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd);
 int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd);
 int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd);

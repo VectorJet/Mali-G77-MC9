@@ -140,7 +140,8 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     idx[0] = 0; idx[1] = 1; idx[2] = 2;
 
     /* Shader program & tiler heap & context */
-    v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - base_gva)), cmd->isa_gpu);
+    v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - base_gva)),
+                           cmd->isa_gpu, 32, 0, true, true, false, false);
     v9_pack_tiler_heap((uint32_t *)(base_cpu + (cmd->tiler_heap_desc_gpu - base_gva)),
                        cmd->tiler_heap_backing_gpu, 0x40000);
     v9_pack_tiler_ctx((uint32_t *)(base_cpu + (cmd->tiler_ctx_gpu - base_gva)),
@@ -207,6 +208,32 @@ int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd) {
     uint32_t *fj2 = (uint32_t *)(base_cpu + (cmd->frag_jc2_gpu - cmd->mem_bo->gpu));
     memset(fj2, 0, 32);
 
+    return 0;
+}
+
+int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
+                                      const struct panvk_v9_compiled_shader *shader) {
+    if (!cmd || !cmd->mem_bo || !shader || !shader->binary ||
+        !shader->binary_size || (shader->binary_size & 7)) {
+        return -EINVAL;
+    }
+
+    if (shader->binary_size > cmd->exec_bo->size) {
+        struct pan_kmod_bo *new_bo = pan_kmod_bo_alloc(
+            cmd->dev, shader->binary_size,
+            PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE | PAN_KMOD_BO_FLAG_EXEC);
+        if (!new_bo) return -ENOMEM;
+        pan_kmod_bo_free(cmd->exec_bo);
+        cmd->exec_bo = new_bo;
+        cmd->isa_gpu = new_bo->gpu;
+    }
+
+    memcpy(cmd->exec_bo->cpu, shader->binary, shader->binary_size);
+    uint8_t *base_cpu = cmd->mem_bo->cpu;
+    v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - cmd->mem_bo->gpu)),
+                           cmd->isa_gpu, shader->work_reg_count, shader->preload,
+                           false, shader->contains_barrier,
+                           shader->ftz_fp16, shader->ftz_fp32);
     return 0;
 }
 

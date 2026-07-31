@@ -7,10 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <pthread.h>
 #include <X11/Xlib.h>
 #include <xcb/xcb.h>
 
 #include "panvk_v9_entrypoints.h"
+#include "panvk_v9_compiler.h"
 
 #define ICD_LOADER_MAGIC 0x01CDC0DEu
 
@@ -130,6 +133,9 @@ struct VkPipeline_T {
     uint32_t stage_mask;
     char vertex_entry_point[64];
     char fragment_entry_point[64];
+    struct panvk_v9_compiled_shader vertex_binary;
+    struct panvk_v9_compiled_shader fragment_binary;
+    bool shaders_compiled;
     uint32_t topology;
     bool primitive_restart;
     struct VkViewport viewport;
@@ -168,6 +174,47 @@ struct VkSemaphore_T {
 struct VkFence_T {
     bool signaled;
 };
+
+struct panvk_compiler_api {
+    void *library;
+    int (*compile)(const uint32_t *, size_t, enum panvk_v9_shader_stage,
+                   const char *, struct panvk_v9_compiled_shader *, char *, size_t);
+    void (*cleanup)(struct panvk_v9_compiled_shader *);
+    bool attempted;
+};
+
+static struct panvk_compiler_api compiler_api;
+static pthread_mutex_t compiler_api_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool load_compiler(void) {
+    pthread_mutex_lock(&compiler_api_mutex);
+    if (compiler_api.attempted) {
+        bool loaded = compiler_api.library != NULL;
+        pthread_mutex_unlock(&compiler_api_mutex);
+        return loaded;
+    }
+    compiler_api.attempted = true;
+
+    const char *path = getenv("PANVK_V9_COMPILER_LIBRARY");
+    if (!path || !path[0]) path = "libpanvk_v9_compiler.so";
+    compiler_api.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!compiler_api.library) {
+        pthread_mutex_unlock(&compiler_api_mutex);
+        return false;
+    }
+
+    compiler_api.compile = dlsym(compiler_api.library, "panvk_v9_compile_spirv");
+    compiler_api.cleanup = dlsym(compiler_api.library, "panvk_v9_compiled_shader_cleanup");
+    if (!compiler_api.compile || !compiler_api.cleanup) {
+        dlclose(compiler_api.library);
+        memset(&compiler_api, 0, sizeof(compiler_api));
+        compiler_api.attempted = true;
+        pthread_mutex_unlock(&compiler_api_mutex);
+        return false;
+    }
+    pthread_mutex_unlock(&compiler_api_mutex);
+    return true;
+}
 
 /* Loader Negotiation */
 VkResult vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion) {
@@ -773,6 +820,55 @@ static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
            VK_SUCCESS : VK_ERROR_INVALID_SHADER_NV;
 }
 
+static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
+                                         const struct VkGraphicsPipelineCreateInfo *info) {
+    const char *required_env = getenv("PANVK_REQUIRE_COMPILER");
+    bool required = required_env && required_env[0] && strcmp(required_env, "0");
+    if (!load_compiler()) {
+        return required ? VK_ERROR_INVALID_SHADER_NV : VK_SUCCESS;
+    }
+
+    char error[512];
+    for (uint32_t i = 0; i < info->stageCount; i++) {
+        const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
+        enum panvk_v9_shader_stage compiler_stage;
+        struct panvk_v9_compiled_shader *binary;
+        if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) {
+            compiler_stage = PANVK_V9_SHADER_VERTEX;
+            binary = &pipeline->vertex_binary;
+        } else if (stage->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+            compiler_stage = PANVK_V9_SHADER_FRAGMENT;
+            binary = &pipeline->fragment_binary;
+        } else {
+            continue;
+        }
+
+        int ret = compiler_api.compile(stage->module->code, stage->module->code_size,
+                                       compiler_stage, stage->pName, binary,
+                                       error, sizeof(error));
+        if (ret) {
+            fprintf(stderr, "panvk: %s shader compilation failed: %s\n",
+                    compiler_stage == PANVK_V9_SHADER_VERTEX ? "vertex" : "fragment",
+                    error[0] ? error : "unknown compiler error");
+            compiler_api.cleanup(&pipeline->vertex_binary);
+            compiler_api.cleanup(&pipeline->fragment_binary);
+            return required ? VK_ERROR_INVALID_SHADER_NV : VK_SUCCESS;
+        }
+    }
+
+    pipeline->shaders_compiled = pipeline->vertex_binary.binary_size != 0;
+    return VK_SUCCESS;
+}
+
+static void pipeline_cleanup(struct VkPipeline_T *pipeline) {
+    if (!pipeline) return;
+    if (compiler_api.cleanup) {
+        compiler_api.cleanup(&pipeline->vertex_binary);
+        compiler_api.cleanup(&pipeline->fragment_binary);
+    }
+    free(pipeline);
+}
+
 static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
                                        const struct VkGraphicsPipelineCreateInfo *info) {
     pipeline->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -832,10 +928,12 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
         VkResult result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
+        if (result == VK_SUCCESS)
+            result = pipeline_compile_shaders(pipe, &pCreateInfos[i]);
         if (result != VK_SUCCESS) {
-            free(pipe);
+            pipeline_cleanup(pipe);
             for (uint32_t j = 0; j < i; j++) {
-                free(pPipelines[j]);
+                pipeline_cleanup(pPipelines[j]);
                 pPipelines[j] = NULL;
             }
             return result;
@@ -856,7 +954,7 @@ VkResult vkCreateComputePipelines(VkDevice device, VkPipelineCache pipelineCache
 }
 
 void vkDestroyPipeline(VkDevice device, VkPipeline pipeline, void *pAllocator) {
-    if (pipeline) free(pipeline);
+    pipeline_cleanup(pipeline);
 }
 
 VkResult vkCreateSemaphore(VkDevice device, const void *pCreateInfo, void *pAllocator, VkSemaphore *pSemaphore) {
@@ -1062,6 +1160,12 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
     if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
+        if (commandBuffer->graphics_pipeline &&
+            commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+            v9_cmd_buffer_set_fragment_shader(
+                commandBuffer->v9_cmd,
+                &commandBuffer->graphics_pipeline->fragment_binary);
+        }
         v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
     }
 }
@@ -1090,6 +1194,12 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
     if (commandBuffer && commandBuffer->v9_cmd && indexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
+        if (commandBuffer->graphics_pipeline &&
+            commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+            v9_cmd_buffer_set_fragment_shader(
+                commandBuffer->v9_cmd,
+                &commandBuffer->graphics_pipeline->fragment_binary);
+        }
         v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
     }
 }
