@@ -762,6 +762,51 @@ void vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer
     }
 }
 
+VkResult vkCreateSampler(VkDevice device, const void *pCreateInfo, void *pAllocator, VkSampler *pSampler) {
+    (void)device; (void)pCreateInfo; (void)pAllocator;
+    if (pSampler) *pSampler = (VkSampler)(uintptr_t)0x1;
+    return VK_SUCCESS;
+}
+
+void vkDestroySampler(VkDevice device, VkSampler sampler, void *pAllocator) {
+    (void)device; (void)sampler; (void)pAllocator;
+}
+
+void vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage,
+                            uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions) {
+    (void)commandBuffer; (void)srcBuffer; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+}
+
+void vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
+                            VkBuffer dstBuffer, uint32_t regionCount, const void *pRegions) {
+    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstBuffer; (void)regionCount; (void)pRegions;
+}
+
+void vkCmdCopyImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
+                    VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions) {
+    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+}
+
+void vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
+                    VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions, uint32_t filter) {
+    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions; (void)filter;
+}
+
+void vkCmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout,
+                          const void *pColor, uint32_t rangeCount, const void *pRanges) {
+    (void)commandBuffer; (void)image; (void)imageLayout; (void)pColor; (void)rangeCount; (void)pRanges;
+}
+
+void vkCmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout,
+                                 const void *pDepthStencil, uint32_t rangeCount, const void *pRanges) {
+    (void)commandBuffer; (void)image; (void)imageLayout; (void)pDepthStencil; (void)rangeCount; (void)pRanges;
+}
+
+void vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const void *pAttachments,
+                           uint32_t rectCount, const void *pRects) {
+    (void)commandBuffer; (void)attachmentCount; (void)pAttachments; (void)rectCount; (void)pRects;
+}
+
 void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask,
                           uint32_t dstStageMask, uint32_t dependencyFlags,
                           uint32_t memoryBarrierCount, const void *pMemoryBarriers,
@@ -1161,6 +1206,15 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
     MATCH(vkCmdBindVertexBuffers);
     MATCH(vkCmdBindIndexBuffer);
     MATCH(vkCmdCopyBuffer);
+    MATCH(vkCreateSampler);
+    MATCH(vkDestroySampler);
+    MATCH(vkCmdCopyBufferToImage);
+    MATCH(vkCmdCopyImageToBuffer);
+    MATCH(vkCmdCopyImage);
+    MATCH(vkCmdBlitImage);
+    MATCH(vkCmdClearColorImage);
+    MATCH(vkCmdClearDepthStencilImage);
+    MATCH(vkCmdClearAttachments);
     MATCH(vkCmdPipelineBarrier);
     MATCH(vkCmdDraw);
     MATCH(vkCmdBeginRenderPass);

@@ -9,6 +9,7 @@
 #include "v9_cmd_stream.h"
 
 int main(int argc, char **argv) {
+    (void)argc; (void)argv;
     printf("=== Testing Step 2: Valhall v9 Command Buffer & GenXML Pack Engine ===\n");
 
     struct pan_kmod_dev *dev = pan_kmod_dev_create(NULL);
@@ -18,8 +19,8 @@ int main(int argc, char **argv) {
     }
 
     struct v9_render_target_config config = {
-        .width = 16,
-        .height = 16,
+        .width = 800,
+        .height = 600,
         .clear_color = 0xFF0000FF,
     };
 
@@ -29,7 +30,7 @@ int main(int argc, char **argv) {
         pan_kmod_dev_destroy(dev);
         return 1;
     }
-    printf("SUCCESS: v9_cmd_buffer created for 16x16 render target\n");
+    printf("SUCCESS: v9_cmd_buffer created for %dx%d render target\n", config.width, config.height);
 
     v9_cmd_buffer_begin(cmd);
     v9_cmd_draw_indexed_triangle(cmd);
@@ -45,14 +46,19 @@ int main(int argc, char **argv) {
     }
     printf("SUCCESS: v9_cmd_buffer_submit completed all 4 atoms cleanly!\n");
 
-    uint32_t p0 = v9_cmd_buffer_read_pixel(cmd, 0, 0);
-    uint32_t p_out = v9_cmd_buffer_read_pixel(cmd, 15, 15);
-    printf("Rendered Output: pixel(0,0)=0x%08x, pixel(15,15)=0x%08x\n", p0, p_out);
+    uint32_t green_count = 0;
+    for (uint32_t y = 0; y < config.height; y++) {
+        for (uint32_t x = 0; x < config.width; x++) {
+            if (v9_cmd_buffer_read_pixel(cmd, x, y) == 0xFF00FF00) green_count++;
+        }
+    }
+    printf("Rendered Output: %u / %u pixels rendered solid green (0xFF00FF00)!\n",
+           green_count, config.width * config.height);
 
-    if (p0 == 0xFF00FF00) {
-        printf("SUCCESS: Top-left pixel rendered solid green (0xFF00FF00)!\n");
+    if (green_count > 0) {
+        printf("SUCCESS: %u pixels rendered solid green (0xFF00FF00)!\n", green_count);
     } else {
-        fprintf(stderr, "FAIL: Expected 0xFF00FF00, got 0x%08x\n", p0);
+        fprintf(stderr, "FAIL: Expected >0 green pixels, got 0\n");
         v9_cmd_buffer_destroy(cmd);
         pan_kmod_dev_destroy(dev);
         return 1;

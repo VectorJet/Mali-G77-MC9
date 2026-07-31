@@ -483,6 +483,15 @@ void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint3
 void vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount, const uint32_t *pDynamicOffsets);
 void vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer *pBuffers, const VkDeviceSize *pOffsets);
 void vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t indexType);
+VkResult vkCreateSampler(VkDevice device, const void *pCreateInfo, void *pAllocator, VkSampler *pSampler);
+void vkDestroySampler(VkDevice device, VkSampler sampler, void *pAllocator);
+void vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions);
+void vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout, VkBuffer dstBuffer, uint32_t regionCount, const void *pRegions);
+void vkCmdCopyImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout, VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions);
+void vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout, VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions, uint32_t filter);
+void vkCmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout, const void *pColor, uint32_t rangeCount, const void *pRanges);
+void vkCmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout, const void *pDepthStencil, uint32_t rangeCount, const void *pRanges);
+void vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount, const void *pAttachments, uint32_t rectCount, const void *pRects);
 void vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer, uint32_t regionCount, const struct VkBufferCopy *pRegions);
 void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask, uint32_t dstStageMask, uint32_t dependencyFlags, uint32_t memoryBarrierCount, const void *pMemoryBarriers, uint32_t bufferMemoryBarrierCount, const void *pBufferMemoryBarriers, uint32_t imageMemoryBarrierCount, const void *pImageMemoryBarriers);
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
