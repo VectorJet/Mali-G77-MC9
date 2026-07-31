@@ -58,6 +58,7 @@ struct VkCommandBuffer_T {
     struct VkRect2D scissor;
     bool viewport_set;
     bool scissor_set;
+    VkDescriptorSet descriptor_sets[8];
 };
 
 struct VkSurfaceKHR_T {
@@ -114,7 +115,8 @@ struct VkShaderModule_T {
 };
 
 struct VkPipelineLayout_T {
-    int dummy;
+    struct panvk_v9_pipeline_layout compiler_layout;
+    struct panvk_v9_descriptor_binding *bindings;
 };
 
 struct VkRenderPass_T {
@@ -135,6 +137,8 @@ struct VkPipeline_T {
     char fragment_entry_point[64];
     struct panvk_v9_compiled_shader vertex_binary;
     struct panvk_v9_compiled_shader fragment_binary;
+    struct panvk_v9_pipeline_layout compiler_layout;
+    struct panvk_v9_descriptor_binding *bindings;
     bool shaders_compiled;
     uint32_t topology;
     bool primitive_restart;
@@ -156,7 +160,10 @@ struct VkPipeline_T {
 };
 
 struct VkDescriptorSetLayout_T {
-    int dummy;
+    uint32_t binding_count;
+    struct VkDescriptorSetLayoutBinding *bindings;
+    uint32_t *binding_offsets;
+    uint32_t descriptor_count;
 };
 
 struct VkDescriptorPool_T {
@@ -164,7 +171,8 @@ struct VkDescriptorPool_T {
 };
 
 struct VkDescriptorSet_T {
-    int dummy;
+    VkDescriptorSetLayout layout;
+    struct VkDescriptorBufferInfo *buffers;
 };
 
 struct VkSemaphore_T {
@@ -178,7 +186,8 @@ struct VkFence_T {
 struct panvk_compiler_api {
     void *library;
     int (*compile)(const uint32_t *, size_t, enum panvk_v9_shader_stage,
-                   const char *, struct panvk_v9_compiled_shader *, char *, size_t);
+                   const char *, const struct panvk_v9_pipeline_layout *,
+                   struct panvk_v9_compiled_shader *, char *, size_t);
     void (*cleanup)(struct panvk_v9_compiled_shader *);
     bool attempted;
 };
@@ -711,15 +720,53 @@ void vkDestroyPipelineCache(VkDevice device, VkPipelineCache pipelineCache, void
     if (pipelineCache) free(pipelineCache);
 }
 
-VkResult vkCreatePipelineLayout(VkDevice device, const void *pCreateInfo, void *pAllocator, VkPipelineLayout *pPipelineLayout) {
-    if (!pPipelineLayout) return VK_ERROR_INITIALIZATION_FAILED;
+VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCreateInfo *pCreateInfo,
+                                void *pAllocator, VkPipelineLayout *pPipelineLayout) {
+    if (!pCreateInfo || !pPipelineLayout) return VK_ERROR_INITIALIZATION_FAILED;
     struct VkPipelineLayout_T *pl = calloc(1, sizeof(*pl));
+    if (!pl) return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+    uint32_t binding_count = 0;
+    for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
+        if (pCreateInfo->pSetLayouts[set])
+            binding_count += pCreateInfo->pSetLayouts[set]->binding_count;
+    }
+    pl->bindings = calloc(binding_count, sizeof(*pl->bindings));
+    if (binding_count && !pl->bindings) {
+        free(pl);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+
+    uint32_t index = 0;
+    uint32_t ubo_index = 0;
+    for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
+        VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
+        if (!set_layout) continue;
+        for (uint32_t i = 0; i < set_layout->binding_count; i++) {
+            const struct VkDescriptorSetLayoutBinding *binding = &set_layout->bindings[i];
+            struct panvk_v9_descriptor_binding *out = &pl->bindings[index++];
+            out->set = set;
+            out->binding = binding->binding;
+            out->descriptor_type = binding->descriptorType;
+            out->array_size = binding->descriptorCount;
+            if (binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                out->resource_index = ubo_index;
+                ubo_index += binding->descriptorCount;
+            }
+        }
+    }
+    pl->compiler_layout.bindings = pl->bindings;
+    pl->compiler_layout.binding_count = binding_count;
+    pl->compiler_layout.ubo_count = ubo_index;
     *pPipelineLayout = pl;
     return VK_SUCCESS;
 }
 
 void vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout pipelineLayout, void *pAllocator) {
-    if (pipelineLayout) free(pipelineLayout);
+    if (!pipelineLayout) return;
+    free(pipelineLayout->bindings);
+    free(pipelineLayout);
 }
 
 VkResult vkCreateRenderPass(VkDevice device, const void *pCreateInfo, void *pAllocator, VkRenderPass *pRenderPass) {
@@ -744,18 +791,43 @@ void vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer, void *pAll
     if (framebuffer) free(framebuffer);
 }
 
-VkResult vkCreateDescriptorSetLayout(VkDevice device, const void *pCreateInfo, void *pAllocator, VkDescriptorSetLayout *pSetLayout) {
-    if (!pSetLayout) return VK_ERROR_INITIALIZATION_FAILED;
+VkResult vkCreateDescriptorSetLayout(VkDevice device,
+                                     const struct VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+                                     void *pAllocator, VkDescriptorSetLayout *pSetLayout) {
+    if (!pCreateInfo || !pSetLayout) return VK_ERROR_INITIALIZATION_FAILED;
     struct VkDescriptorSetLayout_T *dsl = calloc(1, sizeof(*dsl));
+    if (!dsl) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    dsl->binding_count = pCreateInfo->bindingCount;
+    dsl->bindings = calloc(dsl->binding_count, sizeof(*dsl->bindings));
+    dsl->binding_offsets = calloc(dsl->binding_count, sizeof(*dsl->binding_offsets));
+    if (dsl->binding_count && (!dsl->bindings || !dsl->binding_offsets)) {
+        free(dsl->binding_offsets);
+        free(dsl->bindings);
+        free(dsl);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    if (dsl->binding_count) {
+        memcpy(dsl->bindings, pCreateInfo->pBindings,
+               dsl->binding_count * sizeof(*dsl->bindings));
+        for (uint32_t i = 0; i < dsl->binding_count; i++) {
+            dsl->binding_offsets[i] = dsl->descriptor_count;
+            dsl->descriptor_count += dsl->bindings[i].descriptorCount;
+        }
+    }
     *pSetLayout = dsl;
     return VK_SUCCESS;
 }
 
 void vkDestroyDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout setLayout, void *pAllocator) {
-    if (setLayout) free(setLayout);
+    if (!setLayout) return;
+    free(setLayout->binding_offsets);
+    free(setLayout->bindings);
+    free(setLayout);
 }
 
-VkResult vkCreateDescriptorPool(VkDevice device, const void *pCreateInfo, void *pAllocator, VkDescriptorPool *pDescriptorPool) {
+VkResult vkCreateDescriptorPool(VkDevice device,
+                                const struct VkDescriptorPoolCreateInfo *pCreateInfo,
+                                void *pAllocator, VkDescriptorPool *pDescriptorPool) {
     if (!pDescriptorPool) return VK_ERROR_INITIALIZATION_FAILED;
     struct VkDescriptorPool_T *dp = calloc(1, sizeof(*dp));
     *pDescriptorPool = dp;
@@ -766,22 +838,67 @@ void vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, v
     if (descriptorPool) free(descriptorPool);
 }
 
-VkResult vkAllocateDescriptorSets(VkDevice device, const void *pAllocateInfo, VkDescriptorSet *pDescriptorSets) {
-    if (!pDescriptorSets) return VK_ERROR_INITIALIZATION_FAILED;
-    struct VkDescriptorSet_T *ds = calloc(1, sizeof(*ds));
-    *pDescriptorSets = ds;
+VkResult vkAllocateDescriptorSets(VkDevice device,
+                                  const struct VkDescriptorSetAllocateInfo *pAllocateInfo,
+                                  VkDescriptorSet *pDescriptorSets) {
+    if (!pAllocateInfo || !pDescriptorSets || !pAllocateInfo->pSetLayouts)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; i++)
+        pDescriptorSets[i] = NULL;
+    for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
+        VkDescriptorSet set = calloc(1, sizeof(*set));
+        if (!set) goto fail;
+        set->layout = pAllocateInfo->pSetLayouts[i];
+        set->buffers = calloc(set->layout->descriptor_count, sizeof(*set->buffers));
+        if (set->layout->descriptor_count && !set->buffers) {
+            free(set);
+            goto fail;
+        }
+        pDescriptorSets[i] = set;
+    }
     return VK_SUCCESS;
+
+fail:
+    for (uint32_t i = 0; i < pAllocateInfo->descriptorSetCount; i++) {
+        if (!pDescriptorSets[i]) continue;
+        free(pDescriptorSets[i]->buffers);
+        free(pDescriptorSets[i]);
+        pDescriptorSets[i] = NULL;
+    }
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
 VkResult vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets) {
     if (!pDescriptorSets) return VK_SUCCESS;
     for (uint32_t i = 0; i < descriptorSetCount; i++) {
-        if (pDescriptorSets[i]) free(pDescriptorSets[i]);
+        if (pDescriptorSets[i]) {
+            free(pDescriptorSets[i]->buffers);
+            free(pDescriptorSets[i]);
+        }
     }
     return VK_SUCCESS;
 }
 
-void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const void *pDescriptorWrites, uint32_t descriptorCopyCount, const void *pDescriptorCopies) {
+void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
+                            const struct VkWriteDescriptorSet *pDescriptorWrites,
+                            uint32_t descriptorCopyCount, const void *pDescriptorCopies) {
+    for (uint32_t w = 0; w < descriptorWriteCount; w++) {
+        const struct VkWriteDescriptorSet *write = &pDescriptorWrites[w];
+        if (!write->dstSet || !write->pBufferInfo) continue;
+        VkDescriptorSetLayout layout = write->dstSet->layout;
+        for (uint32_t b = 0; b < layout->binding_count; b++) {
+            const struct VkDescriptorSetLayoutBinding *binding = &layout->bindings[b];
+            if (binding->binding != write->dstBinding ||
+                binding->descriptorType != write->descriptorType ||
+                write->dstArrayElement + write->descriptorCount > binding->descriptorCount)
+                continue;
+            memcpy(&write->dstSet->buffers[layout->binding_offsets[b] +
+                                          write->dstArrayElement],
+                   write->pBufferInfo,
+                   write->descriptorCount * sizeof(*write->pBufferInfo));
+            break;
+        }
+    }
 }
 
 static bool pipeline_dynamic_state(const struct VkPipelineDynamicStateCreateInfo *dynamic,
@@ -844,7 +961,9 @@ static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
         }
 
         int ret = compiler_api.compile(stage->module->code, stage->module->code_size,
-                                       compiler_stage, stage->pName, binary,
+                                       compiler_stage, stage->pName,
+                                       &pipeline->compiler_layout,
+                                       binary,
                                        error, sizeof(error));
         if (ret) {
             fprintf(stderr, "panvk: %s shader compilation failed: %s\n",
@@ -866,7 +985,20 @@ static void pipeline_cleanup(struct VkPipeline_T *pipeline) {
         compiler_api.cleanup(&pipeline->vertex_binary);
         compiler_api.cleanup(&pipeline->fragment_binary);
     }
+    free(pipeline->bindings);
     free(pipeline);
+}
+
+static VkResult pipeline_copy_layout(struct VkPipeline_T *pipeline,
+                                     VkPipelineLayout layout) {
+    if (!layout || !layout->compiler_layout.binding_count) return VK_SUCCESS;
+    size_t size = layout->compiler_layout.binding_count * sizeof(*pipeline->bindings);
+    pipeline->bindings = malloc(size);
+    if (!pipeline->bindings) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    memcpy(pipeline->bindings, layout->bindings, size);
+    pipeline->compiler_layout = layout->compiler_layout;
+    pipeline->compiler_layout.bindings = pipeline->bindings;
+    return VK_SUCCESS;
 }
 
 static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
@@ -927,7 +1059,9 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         struct VkPipeline_T *pipe = calloc(1, sizeof(*pipe));
         if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-        VkResult result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
+        VkResult result = pipeline_copy_layout(pipe, pCreateInfos[i].layout);
+        if (result == VK_SUCCESS)
+            result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
         if (result == VK_SUCCESS)
             result = pipeline_compile_shaders(pipe, &pCreateInfos[i]);
         if (result != VK_SUCCESS) {
@@ -1048,6 +1182,7 @@ VkResult vkBeginCommandBuffer(VkCommandBuffer commandBuffer, const struct VkComm
     commandBuffer->graphics_pipeline = NULL;
     commandBuffer->viewport_set = false;
     commandBuffer->scissor_set = false;
+    memset(commandBuffer->descriptor_sets, 0, sizeof(commandBuffer->descriptor_sets));
     return VK_SUCCESS;
 }
 
@@ -1079,6 +1214,11 @@ void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint3
 }
 
 void vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, uint32_t pipelineBindPoint, VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount, const uint32_t *pDynamicOffsets) {
+    if (!commandBuffer || pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS ||
+        firstSet >= 8 || descriptorSetCount > 8 - firstSet ||
+        (descriptorSetCount && !pDescriptorSets)) return;
+    memcpy(&commandBuffer->descriptor_sets[firstSet], pDescriptorSets,
+           descriptorSetCount * sizeof(*pDescriptorSets));
 }
 
 void vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer *pBuffers, const VkDeviceSize *pOffsets) {
@@ -1156,10 +1296,51 @@ void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask,
                           uint32_t imageMemoryBarrierCount, const void *pImageMemoryBarriers) {
 }
 
+static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
+    struct v9_ubo_binding ubos[8];
+    uint32_t ubo_count = 0;
+    VkPipeline pipeline = commandBuffer->graphics_pipeline;
+    if (!pipeline) {
+        v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, NULL, 0);
+        return;
+    }
+
+    for (uint32_t i = 0; i < pipeline->compiler_layout.binding_count; i++) {
+        const struct panvk_v9_descriptor_binding *binding =
+            &pipeline->compiler_layout.bindings[i];
+        if ((binding->descriptor_type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+             binding->descriptor_type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) ||
+            binding->set >= 8 || !commandBuffer->descriptor_sets[binding->set])
+            continue;
+
+        VkDescriptorSet set = commandBuffer->descriptor_sets[binding->set];
+        for (uint32_t b = 0; b < set->layout->binding_count; b++) {
+            if (set->layout->bindings[b].binding != binding->binding) continue;
+            for (uint32_t elem = 0; elem < binding->array_size && ubo_count < 8; elem++) {
+                const struct VkDescriptorBufferInfo *info =
+                    &set->buffers[set->layout->binding_offsets[b] + elem];
+                if (!info->buffer || !info->buffer->bo || info->offset >= info->buffer->size)
+                    continue;
+                VkDeviceSize available = info->buffer->size - info->offset;
+                VkDeviceSize range = info->range == VK_WHOLE_SIZE || info->range > available ?
+                                     available : info->range;
+                ubos[ubo_count++] = (struct v9_ubo_binding) {
+                    .address = info->buffer->bo->gpu + info->buffer->memory_offset + info->offset,
+                    .size = range > UINT32_MAX ? UINT32_MAX : (uint32_t)range,
+                    .index = binding->resource_index + elem,
+                };
+            }
+            break;
+        }
+    }
+    v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
+}
+
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
     if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
+        command_buffer_apply_ubos(commandBuffer);
         if (commandBuffer->graphics_pipeline &&
             commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
             v9_cmd_buffer_set_fragment_shader(
@@ -1194,6 +1375,7 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
     if (commandBuffer && commandBuffer->v9_cmd && indexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
+        command_buffer_apply_ubos(commandBuffer);
         if (commandBuffer->graphics_pipeline &&
             commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
             v9_cmd_buffer_set_fragment_shader(

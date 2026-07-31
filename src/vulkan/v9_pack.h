@@ -57,6 +57,21 @@ static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu,
     pack_u64(sp + 2, isa_gpu);
 }
 
+static inline void v9_pack_buffer(uint32_t *buffer, uint64_t address, uint32_t size) {
+    memset(buffer, 0, 32);
+    buffer[0] = (9u << 0) | (1u << 4);
+    buffer[1] = size;
+    pack_u64(buffer + 2, address);
+}
+
+static inline void v9_pack_resource(uint32_t *resource, uint64_t address,
+                                    uint32_t descriptor_bytes) {
+    memset(resource, 0, 16);
+    resource[0] = (uint32_t)address;
+    resource[1] = (uint32_t)(address >> 32) | (1u << 24);
+    resource[2] = descriptor_bytes;
+}
+
 static inline void v9_pack_tiler_heap(uint32_t *th, uint64_t backing_gpu, uint32_t size) {
     memset(th, 0, 32);
     th[0] = (9u << 0) | (2u << 4) | (0u << 8);

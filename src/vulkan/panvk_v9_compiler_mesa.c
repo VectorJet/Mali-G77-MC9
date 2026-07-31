@@ -15,6 +15,7 @@
 
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
+#include "compiler/nir/nir_builder.h"
 #include "compiler/spirv/nir_spirv.h"
 #include "panfrost/bifrost/bifrost_compile.h"
 #include "panfrost/util/pan_ir.h"
@@ -81,7 +82,78 @@ static bool spirv_has_function_entry_point(const uint32_t *spirv, size_t word_co
     return false;
 }
 
-static bool prepare_nir(nir_shader *nir) {
+struct lower_descriptors_ctx {
+    const struct panvk_v9_pipeline_layout *layout;
+    bool unsupported;
+};
+
+static const struct panvk_v9_descriptor_binding *
+find_descriptor_binding(const struct panvk_v9_pipeline_layout *layout,
+                        uint32_t set, uint32_t binding) {
+    if (!layout) return NULL;
+    for (uint32_t i = 0; i < layout->binding_count; i++) {
+        if (layout->bindings[i].set == set && layout->bindings[i].binding == binding)
+            return &layout->bindings[i];
+    }
+    return NULL;
+}
+
+static bool lower_descriptor_intrinsic(nir_builder *builder,
+                                       nir_instr *instruction, void *data) {
+    if (instruction->type != nir_instr_type_intrinsic) return false;
+    nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instruction);
+    struct lower_descriptors_ctx *ctx = data;
+    builder->cursor = nir_before_instr(instruction);
+    nir_ssa_def *replacement = NULL;
+
+    switch (intrinsic->intrinsic) {
+    case nir_intrinsic_vulkan_resource_index: {
+        const struct panvk_v9_descriptor_binding *binding = find_descriptor_binding(
+            ctx->layout, nir_intrinsic_desc_set(intrinsic),
+            nir_intrinsic_binding(intrinsic));
+        if (!binding || (binding->descriptor_type != 6 && binding->descriptor_type != 8)) {
+            ctx->unsupported = true;
+            return false;
+        }
+        replacement = nir_vec2(builder,
+            nir_iadd(builder, nir_imm_int(builder, binding->resource_index),
+                     intrinsic->src[0].ssa),
+            nir_imm_int(builder, 0));
+        break;
+    }
+    case nir_intrinsic_vulkan_resource_reindex:
+        replacement = nir_vec2(builder,
+            nir_iadd(builder, nir_channel(builder, intrinsic->src[0].ssa, 0),
+                     intrinsic->src[1].ssa),
+            nir_channel(builder, intrinsic->src[0].ssa, 1));
+        break;
+    case nir_intrinsic_load_vulkan_descriptor:
+        if (nir_intrinsic_desc_type(intrinsic) != 6 &&
+            nir_intrinsic_desc_type(intrinsic) != 8) {
+            ctx->unsupported = true;
+            return false;
+        }
+        replacement = intrinsic->src[0].ssa;
+        break;
+    default:
+        return false;
+    }
+
+    nir_ssa_def_rewrite_uses(&intrinsic->dest.ssa, replacement);
+    nir_instr_remove(instruction);
+    return true;
+}
+
+static bool lower_descriptors(nir_shader *nir,
+                              const struct panvk_v9_pipeline_layout *layout) {
+    struct lower_descriptors_ctx ctx = { .layout = layout };
+    NIR_PASS_V(nir, nir_shader_instructions_pass, lower_descriptor_intrinsic,
+               nir_metadata_block_index | nir_metadata_dominance, &ctx);
+    return !ctx.unsupported;
+}
+
+static bool prepare_nir(nir_shader *nir,
+                        const struct panvk_v9_pipeline_layout *layout) {
     /* Match the Vulkan runtime's canonical SPIR-V cleanup before applying
      * Panfrost-specific lowering. In particular, returns and helper functions
      * must not reach the Valhall backend. */
@@ -103,6 +175,9 @@ static bool prepare_nir(nir_shader *nir) {
     NIR_PASS_V(nir, nir_lower_io_to_temporaries, entrypoint, true, true);
     NIR_PASS_V(nir, nir_lower_indirect_derefs,
                nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+    if (!lower_descriptors(nir, layout)) return false;
+    NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ubo,
+               nir_address_format_32bit_index_offset);
     NIR_PASS_V(nir, nir_opt_copy_prop_vars);
     NIR_PASS_V(nir, nir_opt_combine_stores, nir_var_all);
     NIR_PASS_V(nir, nir_opt_trivial_continues);
@@ -122,6 +197,7 @@ static bool prepare_nir(nir_shader *nir) {
 int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
                            enum panvk_v9_shader_stage stage,
                            const char *entry_point,
+                           const struct panvk_v9_pipeline_layout *layout,
                            struct panvk_v9_compiled_shader *result,
                            char *error, size_t error_size) {
     if (!result) return -EINVAL;
@@ -167,8 +243,8 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
         return -EINVAL;
     }
 
-    if (!prepare_nir(nir)) {
-        compiler_error(&diagnostic, "SPIR-V module has no executable entry point");
+    if (!prepare_nir(nir, layout)) {
+        compiler_error(&diagnostic, "shader uses an unsupported descriptor binding");
         ralloc_free(nir);
         return -EINVAL;
     }

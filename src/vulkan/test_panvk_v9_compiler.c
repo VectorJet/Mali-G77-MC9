@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
         PANVK_V9_SHADER_VERTEX : PANVK_V9_SHADER_FRAGMENT;
     struct panvk_v9_compiled_shader shader;
     char error[512];
-    int ret = panvk_v9_compile_spirv(spirv, spirv_size, stage, "main",
+    int ret = panvk_v9_compile_spirv(spirv, spirv_size, stage, "main", NULL,
                                      &shader, error, sizeof(error));
     free(spirv);
     if (ret) {

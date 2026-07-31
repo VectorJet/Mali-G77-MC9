@@ -37,6 +37,7 @@ struct v9_cmd_buffer {
     uint64_t sp_gpu;
     uint64_t isa_gpu;
     uint64_t res_gpu;
+    uint64_t ubo_gpu;
     uint64_t flush_jc_gpu;
     uint64_t tiler_heap_desc_gpu;
     uint64_t tiler_ctx_gpu;
@@ -107,6 +108,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     cmd->sp_gpu                   = base_gva + 0xCC00;
     cmd->isa_gpu                  = cmd->exec_bo->gpu;
     cmd->res_gpu                  = base_gva + 0xD200;
+    cmd->ubo_gpu                  = base_gva + 0xD300;
     cmd->flush_jc_gpu             = base_gva + 0xD400;
     cmd->tiler_heap_desc_gpu      = base_gva + 0xD500;
     cmd->tiler_ctx_gpu            = base_gva + 0xD600;
@@ -234,6 +236,33 @@ int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
                            cmd->isa_gpu, shader->work_reg_count, shader->preload,
                            false, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
+    return 0;
+}
+
+int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
+                           const struct v9_ubo_binding *bindings,
+                           uint32_t binding_count) {
+    if (!cmd || !cmd->mem_bo || (binding_count && !bindings)) return -EINVAL;
+
+    uint32_t descriptor_count = 0;
+    for (uint32_t i = 0; i < binding_count; i++) {
+        if (bindings[i].index >= 8) return -E2BIG;
+        if (bindings[i].index + 1 > descriptor_count)
+            descriptor_count = bindings[i].index + 1;
+    }
+
+    uint8_t *base_cpu = cmd->mem_bo->cpu;
+    uint32_t *ubos = (uint32_t *)(base_cpu + (cmd->ubo_gpu - cmd->mem_bo->gpu));
+    memset(ubos, 0, 8 * 32);
+    for (uint32_t i = 0; i < binding_count; i++) {
+        v9_pack_buffer(ubos + bindings[i].index * 8,
+                       bindings[i].address, bindings[i].size);
+    }
+
+    uint32_t *resources = (uint32_t *)(base_cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
+    memset(resources, 0, 6 * 16);
+    if (descriptor_count)
+        v9_pack_resource(resources, cmd->ubo_gpu, descriptor_count * 32);
     return 0;
 }
 

@@ -30,11 +30,26 @@ struct panvk_v9_compiled_shader {
     bool ftz_fp32;
 };
 
+struct panvk_v9_descriptor_binding {
+    uint32_t set;
+    uint32_t binding;
+    uint32_t descriptor_type;
+    uint32_t array_size;
+    uint32_t resource_index;
+};
+
+struct panvk_v9_pipeline_layout {
+    const struct panvk_v9_descriptor_binding *bindings;
+    uint32_t binding_count;
+    uint32_t ubo_count;
+};
+
 /* Compile Vulkan SPIR-V to Mali Valhall v9 machine code. The returned binary
  * is owned by the result and released with panvk_v9_compiled_shader_cleanup(). */
 int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
                            enum panvk_v9_shader_stage stage,
                            const char *entry_point,
+                           const struct panvk_v9_pipeline_layout *layout,
                            struct panvk_v9_compiled_shader *result,
                            char *error, size_t error_size);
 

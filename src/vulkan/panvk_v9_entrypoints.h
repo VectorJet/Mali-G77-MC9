@@ -103,6 +103,11 @@ extern "C" {
 #define VK_COLOR_COMPONENT_A_BIT 0x00000008
 #define VK_DYNAMIC_STATE_VIEWPORT 0
 #define VK_DYNAMIC_STATE_SCISSOR 1
+#define VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER 6
+#define VK_DESCRIPTOR_TYPE_STORAGE_BUFFER 7
+#define VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC 8
+#define VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC 9
+#define VK_WHOLE_SIZE (~(VkDeviceSize)0)
 
 typedef int VkResult;
 typedef uint64_t VkFlags;
@@ -275,6 +280,68 @@ struct VkBufferCopy {
     VkDeviceSize srcOffset;
     VkDeviceSize dstOffset;
     VkDeviceSize size;
+};
+
+struct VkDescriptorSetLayoutBinding {
+    uint32_t binding;
+    uint32_t descriptorType;
+    uint32_t descriptorCount;
+    uint32_t stageFlags;
+    const VkSampler *pImmutableSamplers;
+};
+
+struct VkDescriptorSetLayoutCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t bindingCount;
+    const struct VkDescriptorSetLayoutBinding *pBindings;
+};
+
+struct VkPipelineLayoutCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t setLayoutCount;
+    const VkDescriptorSetLayout *pSetLayouts;
+    uint32_t pushConstantRangeCount;
+    const void *pPushConstantRanges;
+};
+
+struct VkDescriptorPoolCreateInfo {
+    uint32_t sType;
+    const void *pNext;
+    uint32_t flags;
+    uint32_t maxSets;
+    uint32_t poolSizeCount;
+    const void *pPoolSizes;
+};
+
+struct VkDescriptorSetAllocateInfo {
+    uint32_t sType;
+    const void *pNext;
+    VkDescriptorPool descriptorPool;
+    uint32_t descriptorSetCount;
+    const VkDescriptorSetLayout *pSetLayouts;
+};
+
+struct VkDescriptorBufferInfo {
+    VkBuffer buffer;
+    VkDeviceSize offset;
+    VkDeviceSize range;
+};
+
+struct VkWriteDescriptorSet {
+    uint32_t sType;
+    const void *pNext;
+    VkDescriptorSet dstSet;
+    uint32_t dstBinding;
+    uint32_t dstArrayElement;
+    uint32_t descriptorCount;
+    uint32_t descriptorType;
+    const void *pImageInfo;
+    const struct VkDescriptorBufferInfo *pBufferInfo;
+    const VkBufferView *pTexelBufferView;
 };
 
 struct VkImageCreateInfo {
@@ -619,7 +686,7 @@ void vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule, void *p
 VkResult vkCreatePipelineCache(VkDevice device, const void *pCreateInfo, void *pAllocator, VkPipelineCache *pPipelineCache);
 void vkDestroyPipelineCache(VkDevice device, VkPipelineCache pipelineCache, void *pAllocator);
 
-VkResult vkCreatePipelineLayout(VkDevice device, const void *pCreateInfo, void *pAllocator, VkPipelineLayout *pPipelineLayout);
+VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCreateInfo *pCreateInfo, void *pAllocator, VkPipelineLayout *pPipelineLayout);
 void vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout pipelineLayout, void *pAllocator);
 
 VkResult vkCreateRenderPass(VkDevice device, const void *pCreateInfo, void *pAllocator, VkRenderPass *pRenderPass);
@@ -628,15 +695,15 @@ void vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass, void *pAlloca
 VkResult vkCreateFramebuffer(VkDevice device, const void *pCreateInfo, void *pAllocator, VkFramebuffer *pFramebuffer);
 void vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer, void *pAllocator);
 
-VkResult vkCreateDescriptorSetLayout(VkDevice device, const void *pCreateInfo, void *pAllocator, VkDescriptorSetLayout *pSetLayout);
+VkResult vkCreateDescriptorSetLayout(VkDevice device, const struct VkDescriptorSetLayoutCreateInfo *pCreateInfo, void *pAllocator, VkDescriptorSetLayout *pSetLayout);
 void vkDestroyDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout setLayout, void *pAllocator);
 
-VkResult vkCreateDescriptorPool(VkDevice device, const void *pCreateInfo, void *pAllocator, VkDescriptorPool *pDescriptorPool);
+VkResult vkCreateDescriptorPool(VkDevice device, const struct VkDescriptorPoolCreateInfo *pCreateInfo, void *pAllocator, VkDescriptorPool *pDescriptorPool);
 void vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, void *pAllocator);
 
-VkResult vkAllocateDescriptorSets(VkDevice device, const void *pAllocateInfo, VkDescriptorSet *pDescriptorSets);
+VkResult vkAllocateDescriptorSets(VkDevice device, const struct VkDescriptorSetAllocateInfo *pAllocateInfo, VkDescriptorSet *pDescriptorSets);
 VkResult vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, uint32_t descriptorSetCount, const VkDescriptorSet *pDescriptorSets);
-void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const void *pDescriptorWrites, uint32_t descriptorCopyCount, const void *pDescriptorCopies);
+void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount, const struct VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount, const void *pDescriptorCopies);
 
 VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const struct VkGraphicsPipelineCreateInfo *pCreateInfos, void *pAllocator, VkPipeline *pPipelines);
 VkResult vkCreateComputePipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const void *pCreateInfos, void *pAllocator, VkPipeline *pPipelines);
