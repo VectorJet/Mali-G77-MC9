@@ -148,6 +148,10 @@ struct VkPipeline_T {
     struct panvk_v9_compiled_shader fragment_binary;
     struct panvk_v9_pipeline_layout compiler_layout;
     struct panvk_v9_descriptor_binding *bindings;
+    struct VkVertexInputBindingDescription vertex_bindings[16];
+    struct VkVertexInputAttributeDescription vertex_attributes[16];
+    uint32_t vertex_binding_count;
+    uint32_t vertex_attribute_count;
     bool shaders_compiled;
     uint32_t topology;
     bool primitive_restart;
@@ -201,6 +205,15 @@ struct panvk_compiler_api {
     bool attempted;
 };
 
+/* GLIBC compatibility globals and functions for Bionic */
+char *program_invocation_name = (char *)"vkmark";
+char *program_invocation_short_name = (char *)"vkmark";
+
+extern int *__errno(void);
+int *__errno_location(void) {
+    return __errno();
+}
+
 static struct panvk_compiler_api compiler_api;
 static pthread_mutex_t compiler_api_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -214,9 +227,25 @@ static bool load_compiler(void) {
     compiler_api.attempted = true;
 
     const char *path = getenv("PANVK_V9_COMPILER_LIBRARY");
-    if (!path || !path[0]) path = "libpanvk_v9_compiler.so";
-    compiler_api.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (path && path[0]) {
+        compiler_api.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    }
     if (!compiler_api.library) {
+        compiler_api.library = dlopen("./libpanvk_v9_compiler.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!compiler_api.library) {
+        compiler_api.library = dlopen("/data/data/com.termux/files/home/libpanvk_v9_compiler.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!compiler_api.library) {
+        compiler_api.library = dlopen("libpanvk_v9_compiler.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!compiler_api.library) {
+        const char *err = dlerror();
+        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
+        if (flog) {
+            fprintf(flog, "load_compiler dlopen failed: %s\n", err ? err : "unknown");
+            fclose(flog);
+        }
         pthread_mutex_unlock(&compiler_api_mutex);
         return false;
     }
@@ -224,6 +253,12 @@ static bool load_compiler(void) {
     compiler_api.compile = dlsym(compiler_api.library, "panvk_v9_compile_spirv");
     compiler_api.cleanup = dlsym(compiler_api.library, "panvk_v9_compiled_shader_cleanup");
     if (!compiler_api.compile || !compiler_api.cleanup) {
+        const char *err = dlerror();
+        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
+        if (flog) {
+            fprintf(flog, "load_compiler dlsym failed: %s\n", err ? err : "unknown");
+            fclose(flog);
+        }
         dlclose(compiler_api.library);
         memset(&compiler_api, 0, sizeof(compiler_api));
         compiler_api.attempted = true;
@@ -974,10 +1009,13 @@ static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
                                        &pipeline->compiler_layout,
                                        binary,
                                        error, sizeof(error));
+        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
+        if (flog) {
+            fprintf(flog, "compile stage=%d ret=%d code_size=%zu err='%s'\n",
+                    compiler_stage, ret, stage->module->code_size, error);
+            fclose(flog);
+        }
         if (ret) {
-            fprintf(stderr, "panvk: %s shader compilation failed: %s\n",
-                    compiler_stage == PANVK_V9_SHADER_VERTEX ? "vertex" : "fragment",
-                    error[0] ? error : "unknown compiler error");
             compiler_api.cleanup(&pipeline->vertex_binary);
             compiler_api.cleanup(&pipeline->fragment_binary);
             return required ? VK_ERROR_INVALID_SHADER_NV : VK_SUCCESS;
@@ -1021,6 +1059,27 @@ static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
     pipeline->depth_compare_op = VK_COMPARE_OP_ALWAYS;
     pipeline->color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    if (info->pVertexInputState) {
+        pipeline->vertex_binding_count =
+            info->pVertexInputState->vertexBindingDescriptionCount < 16 ?
+            info->pVertexInputState->vertexBindingDescriptionCount : 16;
+        pipeline->vertex_attribute_count =
+            info->pVertexInputState->vertexAttributeDescriptionCount < 16 ?
+            info->pVertexInputState->vertexAttributeDescriptionCount : 16;
+        if (pipeline->vertex_binding_count &&
+            info->pVertexInputState->pVertexBindingDescriptions) {
+            memcpy(pipeline->vertex_bindings,
+                   info->pVertexInputState->pVertexBindingDescriptions,
+                   pipeline->vertex_binding_count * sizeof(pipeline->vertex_bindings[0]));
+        }
+        if (pipeline->vertex_attribute_count &&
+            info->pVertexInputState->pVertexAttributeDescriptions) {
+            memcpy(pipeline->vertex_attributes,
+                   info->pVertexInputState->pVertexAttributeDescriptions,
+                   pipeline->vertex_attribute_count * sizeof(pipeline->vertex_attributes[0]));
+        }
+    }
 
     if (info->pInputAssemblyState) {
         pipeline->topology = info->pInputAssemblyState->topology;
@@ -1354,22 +1413,59 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
     v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
 }
 
+static uint32_t vk_format_to_pan_v9_attr_format(uint32_t vk_fmt) {
+    switch (vk_fmt) {
+        case 103: /* VK_FORMAT_R32G32_SFLOAT */       return 0x020083;
+        case 106: /* VK_FORMAT_R32G32B32_SFLOAT */    return 0x020084;
+        case 109: /* VK_FORMAT_R32G32B32A32_SFLOAT */ return 0x020085;
+        case 37:  /* VK_FORMAT_R8G8B8A8_UNORM */      return 0x000085;
+        default:                                      return 0x020084;
+    }
+}
+
 static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
-    struct v9_attribute_binding attrs[8];
+    struct v9_attribute_binding attrs[8] = {0};
     uint32_t attr_count = 0;
-    for (uint32_t i = 0; i < 16 && attr_count < 8; i++) {
-        if (!commandBuffer->vertex_bindings[i].buffer ||
-            !commandBuffer->vertex_bindings[i].buffer->bo)
+    VkPipeline pipeline = commandBuffer->graphics_pipeline;
+
+    for (uint32_t i = 0; pipeline && i < pipeline->vertex_attribute_count; i++) {
+        const struct VkVertexInputAttributeDescription *attribute =
+            &pipeline->vertex_attributes[i];
+        if (attribute->location >= 8 || attribute->binding >= 16)
             continue;
-        VkBuffer buf = commandBuffer->vertex_bindings[i].buffer;
-        VkDeviceSize offset = commandBuffer->vertex_bindings[i].offset;
-        attrs[attr_count++] = (struct v9_attribute_binding) {
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = 0,
-            .stride = 16,
+
+        const struct VkVertexInputBindingDescription *binding = NULL;
+        for (uint32_t b = 0; b < pipeline->vertex_binding_count; b++) {
+            if (pipeline->vertex_bindings[b].binding == attribute->binding) {
+                binding = &pipeline->vertex_bindings[b];
+                break;
+            }
+        }
+        VkBuffer buf = commandBuffer->vertex_bindings[attribute->binding].buffer;
+        if (!binding || !buf || !buf->bo) continue;
+
+        VkDeviceSize offset = commandBuffer->vertex_bindings[attribute->binding].offset;
+        attrs[attribute->location] = (struct v9_attribute_binding) {
+            .format = vk_format_to_pan_v9_attr_format(attribute->format),
+            .offset = attribute->offset,
+            .stride = binding->stride,
+            .input_rate = binding->inputRate,
             .buffer_address = buf->bo->gpu + buf->memory_offset + offset,
             .buffer_size = (buf->size > offset) ? (uint32_t)(buf->size - offset) : 0,
         };
+        if (attribute->location + 1 > attr_count)
+            attr_count = attribute->location + 1;
+    }
+    if (attr_count == 0 && commandBuffer->v9_cmd) {
+        attrs[0] = (struct v9_attribute_binding) {
+            .format = vk_format_to_pan_v9_attr_format(VK_FORMAT_R32G32B32_SFLOAT),
+            .offset = 0,
+            .stride = 16,
+            .input_rate = 0,
+            .buffer_address = v9_cmd_buffer_get_pos_gpu(commandBuffer->v9_cmd),
+            .buffer_size = 4096,
+        };
+        attr_count = 1;
     }
     v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
 }
@@ -1386,7 +1482,10 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->vertex_binary);
             }
-            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size &&
+                (!getenv("PANVK_EXPERIMENT_MV11_POSITION") ||
+                 (commandBuffer->graphics_pipeline->vertex_binary.secondary_enable &&
+                  getenv("PANVK_EXPERIMENT_MV11_VARYING")))) {
                 v9_cmd_buffer_set_fragment_shader(
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->fragment_binary);
@@ -1396,8 +1495,11 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
                            commandBuffer->vertex_bindings[0].buffer->bo->gpu +
                            commandBuffer->vertex_bindings[0].buffer->memory_offset +
                            commandBuffer->vertex_bindings[0].offset + (firstVertex * 16) :
-                           0;
-        v9_cmd_draw_indexed(commandBuffer->v9_cmd, 0, vertexCount, 0, pos_gpu, vertexCount);
+                           v9_cmd_buffer_get_pos_gpu(commandBuffer->v9_cmd);
+        uint64_t idx_gpu = getenv("PANVK_EXPERIMENT_MV11_POSITION") ? 0 :
+                           v9_cmd_buffer_get_idx_gpu(commandBuffer->v9_cmd);
+        v9_cmd_draw_indexed(commandBuffer->v9_cmd, idx_gpu, vertexCount, 0,
+                            pos_gpu, vertexCount);
     }
 }
 
@@ -1443,7 +1545,10 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->vertex_binary);
             }
-            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size &&
+                (!getenv("PANVK_EXPERIMENT_MV11_POSITION") ||
+                 (commandBuffer->graphics_pipeline->vertex_binary.secondary_enable &&
+                  getenv("PANVK_EXPERIMENT_MV11_VARYING")))) {
                 v9_cmd_buffer_set_fragment_shader(
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->fragment_binary);
@@ -1453,12 +1558,12 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
                            commandBuffer->vertex_bindings[0].buffer->bo->gpu +
                            commandBuffer->vertex_bindings[0].buffer->memory_offset +
                            commandBuffer->vertex_bindings[0].offset + (vertexOffset * 16) :
-                           0;
+                           v9_cmd_buffer_get_pos_gpu(commandBuffer->v9_cmd);
         uint64_t idx_gpu = commandBuffer->index_buffer && commandBuffer->index_buffer->bo ?
                            commandBuffer->index_buffer->bo->gpu +
                            commandBuffer->index_buffer->memory_offset +
                            commandBuffer->index_offset + (firstIndex * (commandBuffer->index_type == 1 ? 4 : 2)) :
-                           0;
+                           v9_cmd_buffer_get_idx_gpu(commandBuffer->v9_cmd);
         v9_cmd_draw_indexed(commandBuffer->v9_cmd, idx_gpu, indexCount, commandBuffer->index_type, pos_gpu, indexCount);
     }
 }
@@ -1730,10 +1835,23 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
         if (last_cmd) {
             uint32_t *dst = (uint32_t *)sc->image_data;
+            uint64_t nonzero_pixels = 0;
+            uint32_t first_pixel = 0;
             for (uint32_t y = 0; y < sc->height; y++) {
                 for (uint32_t x = 0; x < sc->width; x++) {
-                    dst[y * sc->width + x] = v9_cmd_buffer_read_pixel(last_cmd, x, y);
+                    uint32_t pixel = v9_cmd_buffer_read_pixel(last_cmd, x, y);
+                    dst[y * sc->width + x] = pixel;
+                    if (x == 0 && y == 0) first_pixel = pixel;
+                    nonzero_pixels += pixel != 0;
                 }
+            }
+            if (getenv("PANVK_PRESENT_DEBUG")) {
+                fprintf(stderr,
+                        "panvk present: image=%u size=%ux%u first=0x%08x nonzero=%llu/%llu\n",
+                        pPresentInfo->pImageIndices ? pPresentInfo->pImageIndices[0] : 0,
+                        sc->width, sc->height, first_pixel,
+                        (unsigned long long)nonzero_pixels,
+                        (unsigned long long)sc->width * sc->height);
             }
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {

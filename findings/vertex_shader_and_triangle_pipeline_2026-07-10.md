@@ -136,3 +136,31 @@ If the Malloc Vertex Job (Type 11) proves too complex initially, Chrome's approa
 - `refs/panfork/src/panfrost/compiler/valhall/test/assembler-cases.txt` — ISA encodings
 - `refs/panfork/src/panfrost/compiler/bifrost/bifrost_compile.c` — How Panfrost emits vertex shaders
 - `src/kbase/replay/replay_egl_triangle.c` — Current test harness
+
+---
+
+## Update: Type-11 IDVS position path working (2026-07-31)
+
+The Vulkan path now compiles vertex shaders as Valhall IDVS and can submit a
+384-byte Type-11 Malloc Vertex job. The first hardware attempt returned `0x58`
+because the Local Storage descriptor was at `0xE0A0`, which violates its
+64-byte alignment requirement. Moving it to `0xE100` made the complete
+Tiler → Flush → Fragment → Post-Flush sequence return `0x1` repeatedly.
+
+With vkmark's real `light-basic.vert`, UBO, position attribute, 24-byte vertex
+stride, and 21,516 vertices, the position-only path produces 121,600 non-zero
+green pixels in an 800×600 target. This proves the compiled position shader,
+attribute descriptors, transformed geometry, integrated tiler, polygon list,
+fragment engine, readback, and XCB presentation path all work together.
+
+Run the proven path with:
+
+```sh
+PANVK_EXPERIMENT_MV11_POSITION=1 PANVK_REQUIRE_COMPILER=1 vkmark --winsys xcb -b vertex:duration=2
+```
+
+Secondary IDVS varying execution also completes without a GPU fault when
+enabled with `PANVK_EXPERIMENT_MV11_VARYING=1`, but the real fragment shader
+currently produces an all-zero target. Varying allocation/interpolation
+linkage is therefore the next isolated blocker; position-only remains the
+default Type-11 experiment.

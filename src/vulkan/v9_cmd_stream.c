@@ -40,6 +40,9 @@ struct v9_cmd_buffer {
     uint64_t isa_gpu;
     uint64_t isa_vertex_gpu;
     bool has_vertex_shader;
+    bool has_varying_shader;
+    bool has_draw_command;
+    bool use_malloc_vertex;
     uint64_t res_gpu;
     uint64_t ubo_gpu;
     uint64_t attr_buf_gpu;
@@ -124,7 +127,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     cmd->pos_gpu                  = base_gva + 0xE000;
     cmd->blend_gpu                = base_gva + 0xE040;
     cmd->depth_gpu                = base_gva + 0xE060;
-    cmd->tls_gpu                  = base_gva + 0xE0A0;
+    cmd->tls_gpu                  = base_gva + 0xE100;
     cmd->idx_gpu                  = base_gva + 0xE0C0;
     cmd->tiler_job_gpu            = base_gva + 0xE200;
     cmd->frag_jc_gpu              = base_gva + 0xE380;
@@ -152,7 +155,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
 
     /* Shader program & tiler heap & context */
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - base_gva)),
-                           cmd->isa_gpu, 32, 0, true, true, false, false);
+                           cmd->isa_gpu, 2, 32, 0, true, true, false, false);
     v9_pack_tiler_heap((uint32_t *)(base_cpu + (cmd->tiler_heap_desc_gpu - base_gva)),
                        cmd->tiler_heap_backing_gpu, 0x40000);
     v9_pack_tiler_ctx((uint32_t *)(base_cpu + (cmd->tiler_ctx_gpu - base_gva)),
@@ -243,10 +246,22 @@ int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
     memcpy(cmd->exec_vs_bo->cpu, shader->binary, shader->binary_size);
     uint8_t *base_cpu = cmd->mem_bo->cpu;
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_vertex_gpu - cmd->mem_bo->gpu)),
-                           cmd->isa_vertex_gpu, shader->work_reg_count, shader->preload,
-                           true, shader->contains_barrier,
+                           cmd->isa_vertex_gpu + shader->no_psiz_offset, 3,
+                           shader->work_reg_count, shader->preload,
+                           false, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
+    if (shader->secondary_enable) {
+        v9_pack_shader_program(
+            (uint32_t *)(base_cpu + (cmd->sp_vertex_gpu + 32 - cmd->mem_bo->gpu)),
+            cmd->isa_vertex_gpu + shader->secondary_offset, 3,
+            shader->secondary_work_reg_count, shader->secondary_preload,
+            false, shader->contains_barrier,
+            shader->ftz_fp16, shader->ftz_fp32);
+    }
     cmd->has_vertex_shader = true;
+    cmd->has_varying_shader = shader->secondary_enable &&
+                              getenv("PANVK_EXPERIMENT_MV11_VARYING");
+    cmd->use_malloc_vertex = getenv("PANVK_EXPERIMENT_MV11_POSITION") && shader->idvs;
     return 0;
 }
 
@@ -270,8 +285,8 @@ int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
     memcpy(cmd->exec_bo->cpu, shader->binary, shader->binary_size);
     uint8_t *base_cpu = cmd->mem_bo->cpu;
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - cmd->mem_bo->gpu)),
-                           cmd->isa_gpu, shader->work_reg_count, shader->preload,
-                           false, shader->contains_barrier,
+                           cmd->isa_gpu, 2, shader->work_reg_count, shader->preload,
+                           true, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
     return 0;
 }
@@ -297,6 +312,7 @@ int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
     }
 
     uint32_t *resources = (uint32_t *)(base_cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
+    memset(resources, 0, 12 * 16);
     if (descriptor_count)
         v9_pack_resource(resources, cmd->ubo_gpu, descriptor_count * 32);
     return 0;
@@ -315,7 +331,8 @@ int v9_cmd_buffer_set_attributes(struct v9_cmd_buffer *cmd,
 
     for (uint32_t i = 0; i < binding_count && i < 8; i++) {
         v9_pack_buffer(attr_bufs + i * 8, bindings[i].buffer_address, bindings[i].buffer_size);
-        v9_pack_attribute(attrs + i * 8, bindings[i].format, 1, bindings[i].offset, i, bindings[i].stride);
+        v9_pack_attribute(attrs + i * 8, bindings[i].format, 1, bindings[i].offset,
+                          i, bindings[i].stride, bindings[i].input_rate);
     }
 
     uint32_t *resources = (uint32_t *)(base_cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
@@ -332,12 +349,18 @@ int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
     if (!cmd || !cmd->mem_bo) return -EINVAL;
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
+    printf("v9_cmd_draw_indexed: idx_gpu=0x%llx, index_count=%u, index_type=%u, pos_gpu=0x%llx, vertex_count=%u, has_vs=%d\n",
+           (unsigned long long)idx_gpu, index_count, index_type,
+           (unsigned long long)pos_gpu, vertex_count, cmd->has_vertex_shader);
+
     v9_pack_tiler_job((uint32_t *)(base_cpu + (cmd->tiler_job_gpu - cmd->mem_bo->gpu)),
                       cmd->config.width, cmd->config.height,
                       cmd->tiler_ctx_gpu, idx_gpu, pos_gpu,
                       cmd->depth_gpu, cmd->blend_gpu, cmd->res_gpu,
-                      cmd->sp_gpu, (cmd->has_vertex_shader ? cmd->sp_vertex_gpu : 0), cmd->tls_gpu,
-                      index_count, index_type, vertex_count);
+                      cmd->sp_gpu, (cmd->has_vertex_shader ? cmd->sp_vertex_gpu : 0),
+                      (cmd->has_varying_shader ? cmd->sp_vertex_gpu + 32 : 0), cmd->tls_gpu,
+                      index_count, index_type, vertex_count, cmd->use_malloc_vertex);
+    cmd->has_draw_command = true;
     return 0;
 }
 
@@ -363,10 +386,12 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
 
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
-    /* Re-init TILER_JOB exception header words 0-7 */
+    /* The GPU writes completion state into the job exception header.  A
+     * recorded Vulkan command buffer may be submitted more than once, so
+     * restore the header without repacking the draw payload at word 8+. */
     uint32_t *vt = (uint32_t *)(base_cpu + (cmd->tiler_job_gpu - cmd->mem_bo->gpu));
     memset(vt, 0, 32);
-    vt[4] = (1u << 0) | (7u << 1);
+    vt[4] = cmd->use_malloc_vertex ? (11u << 1) : ((1u << 0) | (7u << 1));
 
     /* Zero polygon list header table before TILER_JOB */
     size_t poly_bytes = ((cmd->config.width + 15) / 16) * ((cmd->config.height + 15) / 16) * 8;
@@ -378,9 +403,12 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
     uint32_t *fj2 = (uint32_t *)(base_cpu + (cmd->frag_jc2_gpu - cmd->mem_bo->gpu));
     v9_pack_frag_job_chain(fj1, fj2, cmd->mfbd_gva, cmd->mfbd2_gpu, cmd->frag_jc2_gpu,
                            cmd->config.width, cmd->config.height);
+    if (cmd->use_malloc_vertex)
+        pack_u64(fj1 + 6, cmd->frag_jc2_gpu);
 
-    /* Re-pack TILER_JOB before submission */
-    v9_cmd_draw_indexed_triangle(cmd);
+    if (!cmd->has_draw_command) {
+        v9_cmd_draw_indexed_triangle(cmd);
+    }
 
     uint32_t event_code = 0;
 
@@ -446,6 +474,14 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
     }
 
     return 0;
+}
+
+uint64_t v9_cmd_buffer_get_pos_gpu(struct v9_cmd_buffer *cmd) {
+    return cmd ? cmd->pos_gpu : 0;
+}
+
+uint64_t v9_cmd_buffer_get_idx_gpu(struct v9_cmd_buffer *cmd) {
+    return cmd ? cmd->idx_gpu : 0;
 }
 
 uint32_t v9_cmd_buffer_read_pixel(struct v9_cmd_buffer *cmd, uint32_t x, uint32_t y) {

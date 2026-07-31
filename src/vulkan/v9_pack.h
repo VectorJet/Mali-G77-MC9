@@ -44,13 +44,13 @@ static inline void v9_pack_depth(uint32_t *zs) {
 }
 
 static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu,
-                                          uint32_t work_reg_count, uint64_t preload,
+                                          uint32_t stage, uint32_t work_reg_count, uint64_t preload,
                                           bool primary_shader, bool contains_barrier,
                                           bool ftz_fp16, bool ftz_fp32) {
     memset(sp, 0, 16);
     uint32_t register_allocation = work_reg_count <= 32 ? 2u : 0u;
     uint32_t ftz_mode = ftz_fp32 ? (ftz_fp16 ? 2u : 1u) : 0u;
-    sp[0] = (8u << 0) | (2u << 4) |
+    sp[0] = (8u << 0) | ((stage & 0xFu) << 4) |
             ((uint32_t)primary_shader << 8) | (ftz_mode << 17) |
             ((uint32_t)contains_barrier << 28) | (register_allocation << 30);
     sp[1] = (uint32_t)(preload >> 48);
@@ -67,10 +67,14 @@ static inline void v9_pack_buffer(uint32_t *buffer, uint64_t address, uint32_t s
 #define MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX   0u
 #define MALI_ATTRIBUTE_DIVISOR_RATE_INSTANCE 1u
 
-static inline void v9_pack_attribute(uint32_t *attr, uint32_t format, uint32_t table, uint32_t offset, uint32_t buffer_index, uint32_t stride) {
+static inline void v9_pack_attribute(uint32_t *attr, uint32_t format, uint32_t table,
+                                     uint32_t offset, uint32_t buffer_index,
+                                     uint32_t stride, uint32_t input_rate) {
     memset(attr, 0, 32);
     attr[0] = (5u << 0) | (0u << 4) | (1u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Offset enable=1 */
-    attr[1] = (table & 0x3Fu) | (MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX << 6); /* Table (1=Attribute Buffer), Explicit Per-Vertex Frequency */
+    attr[1] = (table & 0x3Fu) |
+              ((input_rate ? MALI_ATTRIBUTE_DIVISOR_RATE_INSTANCE :
+                             MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX) << 6);
     attr[2] = offset;
     attr[3] = buffer_index;
     attr[4] = stride;
@@ -147,21 +151,34 @@ static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend
 static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t height,
                                       uint64_t tiler_ctx_gpu, uint64_t idx_gpu, uint64_t pos_gpu,
                                       uint64_t depth_gpu, uint64_t blend_gpu, uint64_t res_gpu,
-                                      uint64_t sp_gpu, uint64_t sp_vertex_gpu, uint64_t tls_gpu,
+                                      uint64_t sp_gpu, uint64_t sp_vertex_gpu,
+                                      uint64_t sp_varying_gpu, uint64_t tls_gpu,
                                       uint32_t index_count, uint32_t index_type,
-                                      uint32_t vertex_count) {
+                                      uint32_t vertex_count, bool malloc_vertex) {
     memset(vt, 0, 384);
-    vt[4] = sp_vertex_gpu ? ((1u << 0) | (6u << 1)) : ((1u << 0) | (7u << 1)); /* Type = 6 (MALLOC_VERTEX_JOB) or 7 (TILER_JOB) */
+    vt[4] = malloc_vertex ? (11u << 1) : ((1u << 0) | (7u << 1));
     pack_u64(vt + 6, 0);           /* Next = 0 */
-    vt[8] = (index_type == 1 ? 0x3C008 : 0x38008); /* Triangles + Index Type U32/U16 */
-    vt[9] = 0x00008100;
-    vt[10] = 1;                    /* Primitive count / base index = 1 */
+    if (malloc_vertex) {
+        uint32_t hw_index_type = idx_gpu ? (index_type == 1 ? 3u : 2u) : 0u;
+        vt[8] = 8u | (hw_index_type << 8) | (1u << 15);
+        vt[9] = 0;
+    } else {
+        vt[8] = (index_type == 1 ? 0x3C008 : 0x38008);
+        vt[9] = 0x00008100;
+    }
+    vt[10] = malloc_vertex ? 0 : 1;
     vt[11] = index_count > 0 ? index_count : 3;
     vt[12] = 1;                    /* Instance count = 1 */
-    vt[13] = vertex_count > 0 ? vertex_count : 3;
+    vt[13] = malloc_vertex ?
+             (sp_varying_gpu ? (32u | (16u << 16)) : 16u) :
+             (vertex_count > 0 ? vertex_count : 3);
+    if (malloc_vertex && sp_varying_gpu)
+        vt[8] |= 1u << 18;         /* Secondary IDVS varying shader */
     pack_u64(vt + 14, tiler_ctx_gpu);
-    vt[17] = 4;
-    pack_u64(vt + 24, tiler_ctx_gpu);
+    if (!malloc_vertex) {
+        vt[17] = 4;
+        pack_u64(vt + 24, tiler_ctx_gpu);
+    }
     vt[27] = (width - 1) | ((height - 1) << 16);
     pack_u64(vt + 28, 0x3f800000ULL);
     pack_u64(vt + 30, idx_gpu);
@@ -169,10 +186,14 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     uint32_t *dw = vt + 32;
     dw[0] = (1u << 0) | (1u << 1) | (1u << 6);
     dw[1] = 0xFFFF | (0x1u << 16);
-    uint64_t V = pos_gpu >> 6;
-    dw[2] = (uint32_t)((V & 0x03FFFFFFu) << 6); /* Pointer bits 25:0, Packet=0 */
-    dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu); /* Pointer bits 57:26 */
-    dw[4] = (16u << 16);
+    if (malloc_vertex) {
+        dw[2] = 1u; /* Packet mode: position shader feeds the integrated tiler. */
+    } else {
+        uint64_t V = pos_gpu >> 6;
+        dw[2] = (uint32_t)((V & 0x03FFFFFFu) << 6);
+        dw[3] = (uint32_t)((V >> 26) & 0xFFFFFFFFu);
+        dw[4] = (16u << 16);
+    }
     dw[7] = 0x3F800000;
     pack_u64(dw + 10, depth_gpu);
     pack_u64(dw + 12, 1ULL | blend_gpu);
@@ -184,20 +205,19 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     pack_u64(se + 12, tls_gpu);
     pack_u64(se + 14, 0);
 
-    if (sp_vertex_gpu) {
+    if (malloc_vertex && sp_vertex_gpu) {
         uint32_t *pos_se = vt + 64; /* Position Shader Environment at offset 256 */
         pos_se[0] = 0;
         pos_se[1] = 0;
-        pack_u64(pos_se + 8, 1ULL | res_gpu);
+        pack_u64(pos_se + 8, 12ULL | res_gpu);
         pack_u64(pos_se + 10, sp_vertex_gpu);
         pack_u64(pos_se + 12, tls_gpu);
-
-        uint32_t *var_se = vt + 80; /* Varying Shader Environment at offset 320 */
-        var_se[0] = 0;
-        var_se[1] = 0;
-        pack_u64(var_se + 8, 1ULL | res_gpu);
-        pack_u64(var_se + 10, sp_vertex_gpu);
-        pack_u64(var_se + 12, tls_gpu);
+    }
+    if (malloc_vertex && sp_varying_gpu) {
+        uint32_t *vary_se = vt + 80; /* Varying Shader Environment at offset 320 */
+        pack_u64(vary_se + 8, 12ULL | res_gpu);
+        pack_u64(vary_se + 10, sp_varying_gpu);
+        pack_u64(vary_se + 12, tls_gpu);
     }
 }
 
@@ -218,7 +238,7 @@ static inline void v9_pack_frag_job_chain(uint32_t *fj1, uint32_t *fj2,
     memset(fj1, 0, 128);
     fj1[4] = (1u << 16) | (9u << 1);   /* 0x00010012: index 1 in chain, Type 9 */
     fj1[5] = 0;
-    pack_u64(fj1 + 6, 0);        /* Next = NULL */
+    pack_u64(fj1 + 6, 0);
     fj1[8] = 0;
     fj1[9] = ((width - 1) >> 4) | (((height - 1) >> 4) << 16);
     pack_u64(fj1 + 10, mfbd1_gpu | 0x01u); /* Polygon List Mode */

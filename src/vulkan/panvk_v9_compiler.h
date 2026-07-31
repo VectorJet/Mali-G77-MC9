@@ -29,6 +29,12 @@ struct panvk_v9_compiled_shader {
     bool ftz_fp16;
     bool ftz_fp32;
     uint64_t outputs_written;
+    bool idvs;
+    uint32_t no_psiz_offset;
+    bool secondary_enable;
+    uint32_t secondary_offset;
+    uint32_t secondary_work_reg_count;
+    uint64_t secondary_preload;
 };
 
 struct panvk_v9_descriptor_binding {

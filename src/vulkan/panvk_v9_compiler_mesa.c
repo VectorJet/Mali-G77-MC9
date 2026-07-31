@@ -13,6 +13,10 @@
 
 #include "panvk_v9_compiler.h"
 
+/* GLIBC compatibility globals for Bionic */
+char *program_invocation_name = (char *)"vkmark";
+char *program_invocation_short_name = (char *)"vkmark";
+
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
@@ -252,7 +256,7 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
     struct panfrost_compile_inputs inputs = {
         .gpu_id = MALI_G77_GPU_ID,
         .fixed_sysval_ubo = -1,
-        .no_idvs = true,
+        .no_idvs = stage != PANVK_V9_SHADER_VERTEX,
         .no_ubo_to_push = true,
         .nr_cbufs = stage == PANVK_V9_SHADER_FRAGMENT ? 1 : 0,
     };
@@ -283,6 +287,14 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
     result->ftz_fp16 = info.ftz_fp16;
     result->ftz_fp32 = info.ftz_fp32;
     result->outputs_written = info.outputs_written;
+    if (stage == PANVK_V9_SHADER_VERTEX) {
+        result->idvs = info.vs.idvs;
+        result->no_psiz_offset = info.vs.no_psiz_offset;
+        result->secondary_enable = info.vs.secondary_enable;
+        result->secondary_offset = info.vs.secondary_offset;
+        result->secondary_work_reg_count = info.vs.secondary_work_reg_count;
+        result->secondary_preload = info.vs.secondary_preload;
+    }
     if (stage == PANVK_V9_SHADER_FRAGMENT) {
         result->writes_depth = info.fs.writes_depth;
         result->writes_stencil = info.fs.writes_stencil;

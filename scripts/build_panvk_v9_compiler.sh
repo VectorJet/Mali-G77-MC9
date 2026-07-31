@@ -56,7 +56,7 @@ subprocess.run(command, cwd=build, check=True)
 PY
 
 mkdir -p "$(dirname "${OUTPUT}")"
-c++ -shared -o "${OUTPUT}" "${BUILD_DIR}/panvk_v9_compiler_mesa.o" \
+c++ -shared -static-libstdc++ -static-libgcc -o "${OUTPUT}" "${BUILD_DIR}/panvk_v9_compiler_mesa.o" \
     -Wl,--no-undefined -Wl,--start-group \
     "${BUILD_DIR}/src/compiler/nir/libnir.a" \
     "${BUILD_DIR}/src/compiler/libcompiler.a" \

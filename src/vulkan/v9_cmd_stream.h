@@ -35,6 +35,7 @@ struct v9_attribute_binding {
     uint32_t format;
     uint32_t offset;
     uint32_t stride;
+    uint32_t input_rate;
     uint64_t buffer_address;
     uint32_t buffer_size;
 };
@@ -62,6 +63,8 @@ int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
 int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd);
 int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd);
 
+uint64_t v9_cmd_buffer_get_pos_gpu(struct v9_cmd_buffer *cmd);
+uint64_t v9_cmd_buffer_get_idx_gpu(struct v9_cmd_buffer *cmd);
 uint32_t v9_cmd_buffer_read_pixel(struct v9_cmd_buffer *cmd, uint32_t x, uint32_t y);
 
 #ifdef __cplusplus

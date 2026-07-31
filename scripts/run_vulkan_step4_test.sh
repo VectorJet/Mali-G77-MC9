@@ -11,7 +11,7 @@ echo "[1/4] Pushing Vulkan Step 4 sources to device..."
 scp -P ${PORT} src/driver/kbase_winsys.h src/driver/kbase_winsys.c \
               src/vulkan/pan_kmod_kbase.h src/vulkan/pan_kmod_kbase.c \
               src/vulkan/v9_pack.h src/vulkan/v9_cmd_stream.h src/vulkan/v9_cmd_stream.c \
-              src/vulkan/panvk_v9_compiler.h \
+              src/vulkan/panvk_v9_compiler.h src/vulkan/panvk_v9_compiler_mesa.c \
               src/vulkan/panvk_v9_entrypoints.h src/vulkan/panvk_v9_entrypoints.c \
               src/vulkan/panvk_v9_icd.json \
               src/vulkan/test_vulkan_loader_icd.c ${REMOTE}:${TARGET_DIR}/
