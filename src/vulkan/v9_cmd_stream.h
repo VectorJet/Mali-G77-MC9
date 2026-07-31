@@ -43,6 +43,9 @@ int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
                            const struct v9_ubo_binding *bindings,
                            uint32_t binding_count);
 int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd);
+int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
+                        uint64_t idx_gpu, uint32_t index_count, uint32_t index_type,
+                        uint64_t pos_gpu, uint32_t vertex_count);
 int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd);
 int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd);
 

@@ -49,6 +49,11 @@ struct VkCommandPool_T {
     struct VkDevice_T *device;
 };
 
+struct vk_vertex_binding {
+    struct VkBuffer_T *buffer;
+    VkDeviceSize offset;
+};
+
 struct VkCommandBuffer_T {
     uintptr_t loader_data;
     struct VkDevice_T *device;
@@ -59,6 +64,10 @@ struct VkCommandBuffer_T {
     bool viewport_set;
     bool scissor_set;
     VkDescriptorSet descriptor_sets[8];
+    struct vk_vertex_binding vertex_bindings[16];
+    struct VkBuffer_T *index_buffer;
+    VkDeviceSize index_offset;
+    uint32_t index_type;
 };
 
 struct VkSurfaceKHR_T {
@@ -1222,9 +1231,18 @@ void vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, uint32_t pipelineBin
 }
 
 void vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer *pBuffers, const VkDeviceSize *pOffsets) {
+    if (!commandBuffer || firstBinding >= 16 || !pBuffers || !pOffsets) return;
+    for (uint32_t i = 0; i < bindingCount && (firstBinding + i) < 16; i++) {
+        commandBuffer->vertex_bindings[firstBinding + i].buffer = pBuffers[i];
+        commandBuffer->vertex_bindings[firstBinding + i].offset = pOffsets[i];
+    }
 }
 
 void vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t indexType) {
+    if (!commandBuffer) return;
+    commandBuffer->index_buffer = buffer;
+    commandBuffer->index_offset = offset;
+    commandBuffer->index_type = indexType;
 }
 
 void vkCmdCopyBuffer(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkBuffer dstBuffer,
@@ -1347,7 +1365,12 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
                 commandBuffer->v9_cmd,
                 &commandBuffer->graphics_pipeline->fragment_binary);
         }
-        v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
+        uint64_t pos_gpu = commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo ?
+                           commandBuffer->vertex_bindings[0].buffer->bo->gpu +
+                           commandBuffer->vertex_bindings[0].buffer->memory_offset +
+                           commandBuffer->vertex_bindings[0].offset + (firstVertex * 16) :
+                           0;
+        v9_cmd_draw_indexed(commandBuffer->v9_cmd, 0, vertexCount, 0, pos_gpu, vertexCount);
     }
 }
 
@@ -1382,7 +1405,17 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
                 commandBuffer->v9_cmd,
                 &commandBuffer->graphics_pipeline->fragment_binary);
         }
-        v9_cmd_draw_indexed_triangle(commandBuffer->v9_cmd);
+        uint64_t pos_gpu = commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo ?
+                           commandBuffer->vertex_bindings[0].buffer->bo->gpu +
+                           commandBuffer->vertex_bindings[0].buffer->memory_offset +
+                           commandBuffer->vertex_bindings[0].offset + (vertexOffset * 16) :
+                           0;
+        uint64_t idx_gpu = commandBuffer->index_buffer && commandBuffer->index_buffer->bo ?
+                           commandBuffer->index_buffer->bo->gpu +
+                           commandBuffer->index_buffer->memory_offset +
+                           commandBuffer->index_offset + (firstIndex * (commandBuffer->index_type == 1 ? 4 : 2)) :
+                           0;
+        v9_cmd_draw_indexed(commandBuffer->v9_cmd, idx_gpu, indexCount, commandBuffer->index_type, pos_gpu, indexCount);
     }
 }
 

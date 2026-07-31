@@ -266,16 +266,24 @@ int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
     return 0;
 }
 
-int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd) {
+int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
+                        uint64_t idx_gpu, uint32_t index_count, uint32_t index_type,
+                        uint64_t pos_gpu, uint32_t vertex_count) {
     if (!cmd || !cmd->mem_bo) return -EINVAL;
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
     v9_pack_tiler_job((uint32_t *)(base_cpu + (cmd->tiler_job_gpu - cmd->mem_bo->gpu)),
                       cmd->config.width, cmd->config.height,
-                      cmd->tiler_ctx_gpu, cmd->idx_gpu, cmd->pos_gpu,
+                      cmd->tiler_ctx_gpu, idx_gpu, pos_gpu,
                       cmd->depth_gpu, cmd->blend_gpu, cmd->res_gpu,
-                      cmd->sp_gpu, cmd->tls_gpu);
+                      cmd->sp_gpu, cmd->tls_gpu,
+                      index_count, index_type, vertex_count);
     return 0;
+}
+
+int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd) {
+    if (!cmd || !cmd->mem_bo) return -EINVAL;
+    return v9_cmd_draw_indexed(cmd, cmd->idx_gpu, 3, 0, cmd->pos_gpu, 3);
 }
 
 int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd) {

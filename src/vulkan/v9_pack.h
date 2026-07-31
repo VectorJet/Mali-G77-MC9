@@ -135,16 +135,18 @@ static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend
 static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t height,
                                       uint64_t tiler_ctx_gpu, uint64_t idx_gpu, uint64_t pos_gpu,
                                       uint64_t depth_gpu, uint64_t blend_gpu, uint64_t res_gpu,
-                                      uint64_t sp_gpu, uint64_t tls_gpu) {
+                                      uint64_t sp_gpu, uint64_t tls_gpu,
+                                      uint32_t index_count, uint32_t index_type,
+                                      uint32_t vertex_count) {
     memset(vt, 0, 256);
     vt[4] = (1u << 0) | (7u << 1); /* Type = 7 (TILER_JOB) */
     pack_u64(vt + 6, 0);           /* Next = 0 */
-    vt[8] = 0x38008;               /* Triangles + Index Type U16 */
+    vt[8] = (index_type == 1 ? 0x3C008 : 0x38008); /* Triangles + Index Type U32/U16 */
     vt[9] = 0x00008100;
     vt[10] = 1;                    /* Primitive count / base index = 1 */
-    vt[11] = 3;                    /* Index count = 3 */
+    vt[11] = index_count > 0 ? index_count : 3;
     vt[12] = 1;                    /* Instance count = 1 */
-    vt[13] = 3;                    /* Vertex count hint = 3 */
+    vt[13] = vertex_count > 0 ? vertex_count : 3;
     pack_u64(vt + 14, tiler_ctx_gpu);
     vt[17] = 4;
     pack_u64(vt + 24, tiler_ctx_gpu);
