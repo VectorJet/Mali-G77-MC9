@@ -90,6 +90,7 @@ struct VkSwapchainKHR_T {
     struct VkImage_T *images;
     GC gc;
     xcb_gcontext_t xcb_gc;
+    xcb_pixmap_t xcb_pixmap;
     XImage *ximage;
     char *image_data;
 };
@@ -1801,11 +1802,19 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
     }
 
     if (sc->surface && sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
+        uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
+        uint32_t values[] = { XCB_BACK_PIXMAP_NONE };
+        xcb_change_window_attributes(sc->surface->connection, sc->surface->window, XCB_CW_BACK_PIXMAP, values);
+
+        sc->xcb_pixmap = xcb_generate_id(sc->surface->connection);
+        xcb_create_pixmap(sc->surface->connection, depth, sc->xcb_pixmap, sc->surface->window, sc->width, sc->height);
+
         sc->xcb_gc = xcb_generate_id(sc->surface->connection);
         xcb_create_gc(sc->surface->connection, sc->xcb_gc, sc->surface->window, 0, NULL);
         sc->image_data = malloc(sc->width * sc->height * 4);
     } else if (sc->surface && sc->surface->dpy && sc->surface->window) {
         int screen = DefaultScreen(sc->surface->dpy);
+        XSetWindowBackgroundPixmap(sc->surface->dpy, sc->surface->window, None);
         sc->gc = XCreateGC(sc->surface->dpy, sc->surface->window, 0, NULL);
         sc->image_data = malloc(sc->width * sc->height * 4);
         if (sc->image_data) {
@@ -1821,8 +1830,9 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
 void vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, void *pAllocator) {
     if (!swapchain) return;
     if (swapchain->images) free(swapchain->images);
-    if (swapchain->surface && swapchain->surface->is_xcb && swapchain->surface->connection && swapchain->xcb_gc) {
-        xcb_free_gc(swapchain->surface->connection, swapchain->xcb_gc);
+    if (swapchain->surface && swapchain->surface->is_xcb && swapchain->surface->connection) {
+        if (swapchain->xcb_pixmap) xcb_free_pixmap(swapchain->surface->connection, swapchain->xcb_pixmap);
+        if (swapchain->xcb_gc) xcb_free_gc(swapchain->surface->connection, swapchain->xcb_gc);
     } else if (swapchain->surface && swapchain->surface->dpy && swapchain->gc) {
         XFreeGC(swapchain->surface->dpy, swapchain->gc);
     }
@@ -1848,7 +1858,8 @@ VkResult vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint
 
 VkResult vkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, void *semaphore, void *fence, uint32_t *pImageIndex) {
     if (!swapchain || !pImageIndex) return VK_ERROR_INITIALIZATION_FAILED;
-    *pImageIndex = 0;
+    static uint32_t g_current_image_idx = 0;
+    *pImageIndex = (g_current_image_idx++) % (swapchain->image_count > 0 ? swapchain->image_count : 1);
     if (fence) ((VkFence)fence)->signaled = true;
     return VK_SUCCESS;
 }
@@ -1891,10 +1902,16 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
             uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
-            xcb_put_image(sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                          sc->surface->window, sc->xcb_gc,
-                          sc->width, sc->height, 0, 0, 0, depth,
-                          sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
+            xcb_drawable_t target = sc->xcb_pixmap ? sc->xcb_pixmap : sc->surface->window;
+            xcb_put_image(
+                sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                target, sc->xcb_gc,
+                sc->width, sc->height, 0, 0, 0, depth,
+                sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
+            if (sc->xcb_pixmap) {
+                xcb_copy_area(sc->surface->connection, sc->xcb_pixmap, sc->surface->window,
+                              sc->xcb_gc, 0, 0, 0, 0, sc->width, sc->height);
+            }
             xcb_flush(sc->surface->connection);
         } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {
             XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
