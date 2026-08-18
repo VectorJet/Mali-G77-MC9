@@ -60,6 +60,12 @@ int v9_cmd_draw_indexed_triangle(struct v9_cmd_buffer *cmd);
 int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
                         uint64_t idx_gpu, uint32_t index_count, uint32_t index_type,
                         uint64_t pos_gpu, uint32_t vertex_count);
+int v9_cmd_buffer_update_transformed_vertices(struct v9_cmd_buffer *cmd,
+                                              const float *mvp_matrix,
+                                              const float *positions,
+                                              const float *normals,
+                                              const float *colors,
+                                              uint32_t vertex_count);
 int v9_cmd_buffer_end(struct v9_cmd_buffer *cmd);
 int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd);
 

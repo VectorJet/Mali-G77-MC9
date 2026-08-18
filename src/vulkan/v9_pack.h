@@ -39,8 +39,9 @@ static inline void v9_pack_tls(uint32_t *ls, uint64_t tls_base) {
 
 static inline void v9_pack_depth(uint32_t *zs) {
     memset(zs, 0, 32);
-    zs[0] = (7u << 0) | (7u << 4) | (7u << 16);
-    zs[4] = (1u << 22) | (7u << 29);
+    zs[0] = (7u << 0) | (7u << 4) | (7u << 16); /* Type=7 (Depth/stencil), Front=Always(7), Back=Always(7) */
+    zs[1] = 0x0000FFFFu;                          /* Front/Back write mask 0xFF */
+    zs[4] = (1u << 27) | (7u << 29);             /* Depth write enable=1, Depth function=Always(7) */
 }
 
 static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu,
@@ -71,7 +72,7 @@ static inline void v9_pack_attribute(uint32_t *attr, uint32_t format, uint32_t t
                                      uint32_t offset, uint32_t buffer_index,
                                      uint32_t stride, uint32_t input_rate) {
     memset(attr, 0, 32);
-    attr[0] = (5u << 0) | (1u << 4) | (1u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Type=1 (1D), Offset enable=1 */
+    attr[0] = (5u << 0) | (1u << 4) | (0u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Type=1 (1D), Offset enable=0 */
     attr[1] = (table & 0x3Fu) |
               ((input_rate ? MALI_ATTRIBUTE_DIVISOR_RATE_INSTANCE :
                              MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX) << 6);
@@ -151,7 +152,8 @@ static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend
 
 static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t height,
                                       uint64_t tiler_ctx_gpu, uint64_t idx_gpu, uint64_t pos_gpu,
-                                      uint64_t depth_gpu, uint64_t blend_gpu, uint64_t res_gpu,
+                                      uint64_t depth_gpu, uint64_t blend_gpu,
+                                      uint64_t res_gpu, uint64_t res_frag_gpu,
                                       uint64_t sp_gpu, uint64_t sp_vertex_gpu,
                                       uint64_t sp_varying_gpu, uint64_t tls_gpu,
                                       uint32_t index_count, uint32_t index_type,
@@ -159,22 +161,17 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     memset(vt, 0, 384);
     vt[4] = malloc_vertex ? (11u << 1) : ((1u << 0) | (7u << 1));
     pack_u64(vt + 6, 0);           /* Next = 0 */
-    if (malloc_vertex) {
-        uint32_t hw_index_type = idx_gpu ? (index_type == 1 ? 3u : 2u) : 0u;
-        vt[8] = 8u | (hw_index_type << 8) | (1u << 15);
-        vt[9] = 0;
-    } else {
-        vt[8] = (index_type == 1 ? 0x3C008 : 0x38008);
-        vt[9] = 0x00008100;
-    }
-    vt[10] = malloc_vertex ? 0 : 1;
+    uint32_t hw_index_type = idx_gpu ? (index_type == 1 ? 3u : 2u) : 0u;
+    vt[8] = 8u | (hw_index_type << 8) | (1u << 15);
+    if (malloc_vertex && sp_varying_gpu)
+        vt[8] |= 1u << 18;         /* Secondary IDVS varying shader */
+    vt[9] = 0;                     /* Base vertex offset = 0 */
+    vt[10] = 0;                    /* Instance offset = 0 */
     vt[11] = index_count > 0 ? index_count : 3;
     vt[12] = 1;                    /* Instance count = 1 */
     vt[13] = malloc_vertex ?
              (sp_varying_gpu ? (32u | (16u << 16)) : 16u) :
              (vertex_count > 0 ? vertex_count : 3);
-    if (malloc_vertex && sp_varying_gpu)
-        vt[8] |= 1u << 18;         /* Secondary IDVS varying shader */
     pack_u64(vt + 14, tiler_ctx_gpu);
     if (!malloc_vertex) {
         vt[17] = 4;
@@ -185,7 +182,7 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     pack_u64(vt + 30, idx_gpu);
 
     uint32_t *dw = vt + 32;
-    dw[0] = (1u << 0) | (1u << 1) | (1u << 6);
+    dw[0] = (1u << 0) | (1u << 1) | (1u << 6) | (1u << 16); /* Forward pixel kill, Front face CCW=true */
     dw[1] = 0xFFFF | (0x1u << 16);
     if (malloc_vertex) {
         dw[2] = 1u; /* Packet mode: position shader feeds the integrated tiler. */
@@ -201,7 +198,7 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     uint32_t *se = dw + 16;
     se[0] = 0;
     se[1] = 0;
-    pack_u64(se + 8, 12ULL | res_gpu);
+    pack_u64(se + 8, 12ULL | (res_frag_gpu ? res_frag_gpu : res_gpu));
     pack_u64(se + 10, sp_gpu);
     pack_u64(se + 12, tls_gpu);
     pack_u64(se + 14, 0);
@@ -216,6 +213,8 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     }
     if (malloc_vertex && sp_varying_gpu) {
         uint32_t *vary_se = vt + 80; /* Varying Shader Environment at offset 320 */
+        vary_se[0] = 0;
+        vary_se[1] = 0;
         pack_u64(vary_se + 8, 12ULL | res_gpu);
         pack_u64(vary_se + 10, sp_varying_gpu);
         pack_u64(vary_se + 12, tls_gpu);

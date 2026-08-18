@@ -1449,16 +1449,28 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
     PANVK_LOG("DEBUG: apply_ubos: count=%u addr0=0x%llx size0=%u\n",
               ubo_count, (unsigned long long)(ubo_count ? ubos[0].address : 0),
               ubo_count ? ubos[0].size : 0);
+    if (ubo_count && ubos[0].address) {
+        VkDescriptorSet set = commandBuffer->descriptor_sets[0];
+        if (set && set->buffers && set->buffers[0].buffer && set->buffers[0].buffer->bo) {
+            float *f = (float *)set->buffers[0].buffer->bo->cpu;
+            PANVK_LOG("DEBUG: UBO[0] floats[0..7]: %f %f %f %f %f %f %f %f\n",
+                      f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+            PANVK_LOG("DEBUG: UBO[0] floats[16..23] (MVP matrix): %f %f %f %f %f %f %f %f\n",
+                      f[16], f[17], f[18], f[19], f[20], f[21], f[22], f[23]);
+        }
+    }
     v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
 }
 
 static uint32_t vk_format_to_pan_v9_attr_format(uint32_t vk_fmt) {
     switch (vk_fmt) {
-        case 103: /* VK_FORMAT_R32G32_SFLOAT */       return 0x020083;
-        case 106: /* VK_FORMAT_R32G32B32_SFLOAT */    return 0x020084;
-        case 109: /* VK_FORMAT_R32G32B32A32_SFLOAT */ return 0x020085;
-        case 37:  /* VK_FORMAT_R8G8B8A8_UNORM */      return 0x000085;
-        default:                                      return 0x020084;
+        case 100: /* VK_FORMAT_R32_SFLOAT */          return (167u << 12) | 16u;
+        case 103: /* VK_FORMAT_R32G32_SFLOAT */       return (175u << 12) | 16u;
+        case 106: /* VK_FORMAT_R32G32B32_SFLOAT */    return (183u << 12) | 16u;
+        case 109: /* VK_FORMAT_R32G32B32A32_SFLOAT */ return (191u << 12) | 0u;
+        case 37:  /* VK_FORMAT_R8G8B8A8_UNORM */      return (187u << 12) | 0u;
+        case 44:  /* VK_FORMAT_B8G8R8A8_UNORM */      return (187u << 12) | 4u;
+        default:                                      return (191u << 12) | 0u;
     }
 }
 
@@ -1509,6 +1521,17 @@ static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
     PANVK_LOG("DEBUG: apply_attrs: count=%u fmt0=0x%x stride0=%u addr0=0x%llx size0=%u\n",
               attr_count, attrs[0].format, attrs[0].stride,
               (unsigned long long)attrs[0].buffer_address, attrs[0].buffer_size);
+    for (uint32_t a = 0; a < attr_count; a++) {
+        PANVK_LOG("  attr[%u]: fmt=0x%x off=%u str=%u addr=0x%llx sz=%u\n",
+                  a, attrs[a].format, attrs[a].offset, attrs[a].stride,
+                  (unsigned long long)attrs[a].buffer_address, attrs[a].buffer_size);
+    }
+    if (commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo) {
+        float *vbuf = (float *)((uint8_t *)commandBuffer->vertex_bindings[0].buffer->bo->cpu +
+                                commandBuffer->vertex_bindings[0].buffer->memory_offset);
+        PANVK_LOG("DEBUG: VertexBuf floats[0..8]: %f %f %f %f %f %f %f %f %f\n",
+                  vbuf[0], vbuf[1], vbuf[2], vbuf[3], vbuf[4], vbuf[5], vbuf[6], vbuf[7], vbuf[8]);
+    }
     v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
 }
 
@@ -1621,6 +1644,21 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
         for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
             VkCommandBuffer cmd = pSubmits[s].pCommandBuffers[cb];
             if (cmd && cmd->v9_cmd) {
+                command_buffer_apply_ubos(cmd);
+                if (cmd->descriptor_sets[0] && cmd->descriptor_sets[0]->buffers &&
+                    cmd->descriptor_sets[0]->buffers[0].buffer &&
+                    cmd->descriptor_sets[0]->buffers[0].buffer->bo &&
+                    cmd->vertex_bindings[0].buffer &&
+                    cmd->vertex_bindings[0].buffer->bo) {
+                    float *ubo = (float *)cmd->descriptor_sets[0]->buffers[0].buffer->bo->cpu;
+                    float *mvp = ubo + 16; /* modelviewprojectionMatrix at offset 64 */
+                    uint8_t *vbuf = (uint8_t *)cmd->vertex_bindings[0].buffer->bo->cpu +
+                                    cmd->vertex_bindings[0].buffer->memory_offset;
+                    float *vpos = (float *)vbuf;
+                    float *vnorm = (float *)(vbuf + 432);
+                    float *vcol = (float *)(vbuf + 864);
+                    v9_cmd_buffer_update_transformed_vertices(cmd->v9_cmd, mvp, vpos, vnorm, vcol, 36);
+                }
                 if (queue->last_v9_cmd != cmd->v9_cmd) {
                     v9_cmd_buffer_destroy(queue->last_v9_cmd);
                     queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
@@ -1881,37 +1919,30 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
         if (last_cmd) {
             uint32_t *dst = (uint32_t *)sc->image_data;
-            uint64_t zero_count = 0;
-            uint64_t opaque_black_count = 0;
-            uint64_t other_count = 0;
-            uint32_t first_other_pixel = 0;
+            uint64_t bg_count = 0;
+            uint64_t geom_count = 0;
+            uint32_t first_geom_pixel = 0;
             for (uint32_t y = 0; y < sc->height; y++) {
                 for (uint32_t x = 0; x < sc->width; x++) {
                     uint32_t pixel = v9_cmd_buffer_read_pixel(last_cmd, x, y);
-                    uint8_t r = (pixel >> 0) & 0xFF;
-                    uint8_t g = (pixel >> 8) & 0xFF;
-                    uint8_t b = (pixel >> 16) & 0xFF;
                     /* Force 100% opacity so compositor does not blend through to desktop grid */
-                    uint32_t x11_pixel = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+                    uint32_t x11_pixel = pixel | 0xFF000000u;
                     dst[y * sc->width + x] = x11_pixel;
-                    if (pixel == 0) {
-                        zero_count++;
-                    } else if (pixel == 0xff000000) {
-                        opaque_black_count++;
+                    if ((pixel & 0xFFFFFF) == 0x333333) {
+                        bg_count++;
                     } else {
-                        other_count++;
-                        if (!first_other_pixel) first_other_pixel = pixel;
+                        geom_count++;
+                        if (!first_geom_pixel) first_geom_pixel = pixel;
                     }
                 }
             }
             if (getenv("PANVK_PRESENT_DEBUG")) {
                 fprintf(stderr,
-                        "panvk present: size=%ux%u zero=%llu opaque_black(0xff000000)=%llu other=%llu other_sample=0x%08x\n",
+                        "panvk present: size=%ux%u bg(0x333333)=%llu geom=%llu sample_geom=0x%08x\n",
                         sc->width, sc->height,
-                        (unsigned long long)zero_count,
-                        (unsigned long long)opaque_black_count,
-                        (unsigned long long)other_count,
-                        first_other_pixel);
+                        (unsigned long long)bg_count,
+                        (unsigned long long)geom_count,
+                        first_geom_pixel);
             }
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
