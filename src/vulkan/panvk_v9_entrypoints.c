@@ -1879,7 +1879,12 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
             for (uint32_t y = 0; y < sc->height; y++) {
                 for (uint32_t x = 0; x < sc->width; x++) {
                     uint32_t pixel = v9_cmd_buffer_read_pixel(last_cmd, x, y);
-                    dst[y * sc->width + x] = pixel;
+                    uint8_t r = (pixel >> 0) & 0xFF;
+                    uint8_t g = (pixel >> 8) & 0xFF;
+                    uint8_t b = (pixel >> 16) & 0xFF;
+                    /* Force 100% opacity so compositor does not blend through to desktop grid */
+                    uint32_t x11_pixel = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+                    dst[y * sc->width + x] = x11_pixel;
                     if (pixel == 0) {
                         zero_count++;
                     } else if (pixel == 0xff000000) {
