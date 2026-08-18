@@ -50,6 +50,15 @@ int main(int argc, char **argv) {
     printf("Valhall binary: %zu bytes, work registers: %u, preload: 0x%llx, TLS: %u\n",
            shader.binary_size, shader.work_reg_count,
            (unsigned long long)shader.preload, shader.tls_size);
+    printf("Secondary: enable=%d offset=%u work_regs=%u preload=0x%llx\n",
+           shader.secondary_enable, shader.secondary_offset,
+           shader.secondary_work_reg_count, (unsigned long long)shader.secondary_preload);
+    printf("Binary hex dump (%zu bytes):\n", shader.binary_size);
+    const uint8_t *b = shader.binary;
+    for (size_t i = 0; i < shader.binary_size; i += 8) {
+        printf("  [%04zx] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               i, b[i], b[i+1], b[i+2], b[i+3], b[i+4], b[i+5], b[i+6], b[i+7]);
+    }
     if (!shader.binary_size || (shader.binary_size & 7)) {
         fprintf(stderr, "compiler returned an invalid Valhall instruction stream size\n");
         panvk_v9_compiled_shader_cleanup(&shader);

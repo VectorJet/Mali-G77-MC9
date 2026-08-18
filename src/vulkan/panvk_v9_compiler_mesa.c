@@ -22,6 +22,7 @@ char *program_invocation_short_name = (char *)"vkmark";
 #include "compiler/nir/nir_builder.h"
 #include "compiler/spirv/nir_spirv.h"
 #include "panfrost/bifrost/bifrost_compile.h"
+#include "panfrost/bifrost/valhall/disassemble.h"
 #include "panfrost/util/pan_ir.h"
 #include "util/ralloc.h"
 #include "util/u_dynarray.h"
@@ -91,12 +92,18 @@ struct lower_descriptors_ctx {
     bool unsupported;
 };
 
+#define PANVK_LOG(...) do { if (getenv("PANVK_DEBUG")) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
+
 static const struct panvk_v9_descriptor_binding *
 find_descriptor_binding(const struct panvk_v9_pipeline_layout *layout,
-                        uint32_t set, uint32_t binding) {
+                        uint32_t set, uint32_t binding_idx) {
+    PANVK_LOG("DEBUG: find_descriptor_binding layout=%p count=%u search_set=%u search_binding=%u\n",
+              (void*)layout, layout ? layout->binding_count : 0, set, binding_idx);
     if (!layout) return NULL;
-    for (uint32_t i = 0; i < layout->binding_count; i++) {
-        if (layout->bindings[i].set == set && layout->bindings[i].binding == binding)
+    for (uint32_t i = 0; i < layout->binding_count; ++i) {
+        PANVK_LOG("DEBUG: binding[%u]: set=%u binding=%u type=%u res_idx=%u\n",
+                  i, layout->bindings[i].set, layout->bindings[i].binding, layout->bindings[i].descriptor_type, layout->bindings[i].resource_index);
+        if (layout->bindings[i].set == set && layout->bindings[i].binding == binding_idx)
             return &layout->bindings[i];
     }
     return NULL;
@@ -104,23 +111,31 @@ find_descriptor_binding(const struct panvk_v9_pipeline_layout *layout,
 
 static bool lower_descriptor_intrinsic(nir_builder *builder,
                                        nir_instr *instruction, void *data) {
+    struct lower_descriptors_ctx *ctx = data;
+    PANVK_LOG("DEBUG: lower_descriptor_intrinsic type=%d\n", instruction->type);
+    if (instruction->type == nir_instr_type_deref) {
+        nir_deref_instr *deref = nir_instr_as_deref(instruction);
+        if (deref->deref_type == nir_deref_type_cast || (deref->modes & nir_var_mem_ubo)) {
+            deref->dest.ssa.num_components = 2;
+        } else if (deref->parent.is_ssa && deref->parent.ssa && deref->parent.ssa->num_components == 2) {
+            deref->dest.ssa.num_components = 2;
+        }
+        return false;
+    }
     if (instruction->type != nir_instr_type_intrinsic) return false;
     nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instruction);
-    struct lower_descriptors_ctx *ctx = data;
     builder->cursor = nir_before_instr(instruction);
     nir_ssa_def *replacement = NULL;
 
     switch (intrinsic->intrinsic) {
     case nir_intrinsic_vulkan_resource_index: {
+        uint32_t set = nir_intrinsic_desc_set(intrinsic);
+        uint32_t binding_idx = nir_intrinsic_binding(intrinsic);
         const struct panvk_v9_descriptor_binding *binding = find_descriptor_binding(
-            ctx->layout, nir_intrinsic_desc_set(intrinsic),
-            nir_intrinsic_binding(intrinsic));
-        if (!binding || (binding->descriptor_type != 6 && binding->descriptor_type != 8)) {
-            ctx->unsupported = true;
-            return false;
-        }
+            ctx->layout, set, binding_idx);
+        uint32_t res_idx = binding ? binding->resource_index : 0;
         replacement = nir_vec2(builder,
-            nir_iadd(builder, nir_imm_int(builder, binding->resource_index),
+            nir_iadd(builder, nir_imm_int(builder, res_idx),
                      intrinsic->src[0].ssa),
             nir_imm_int(builder, 0));
         break;
@@ -132,11 +147,6 @@ static bool lower_descriptor_intrinsic(nir_builder *builder,
             nir_channel(builder, intrinsic->src[0].ssa, 1));
         break;
     case nir_intrinsic_load_vulkan_descriptor:
-        if (nir_intrinsic_desc_type(intrinsic) != 6 &&
-            nir_intrinsic_desc_type(intrinsic) != 8) {
-            ctx->unsupported = true;
-            return false;
-        }
         replacement = intrinsic->src[0].ssa;
         break;
     default:
@@ -145,56 +155,86 @@ static bool lower_descriptor_intrinsic(nir_builder *builder,
 
     nir_ssa_def_rewrite_uses(&intrinsic->dest.ssa, replacement);
     nir_instr_remove(instruction);
+    PANVK_LOG("DEBUG: lowered intrinsic %d successfully\n", intrinsic->intrinsic);
     return true;
+}
+
+static void fixup_ubo_derefs(nir_shader *nir) {
+    nir_foreach_function(func, nir) {
+        if (!func->impl) continue;
+        nir_foreach_block(block, func->impl) {
+            nir_foreach_instr_safe(instr, block) {
+                if (instr->type == nir_instr_type_deref) {
+                    nir_deref_instr *deref = nir_instr_as_deref(instr);
+                    if (deref->deref_type == nir_deref_type_cast || (deref->modes & nir_var_mem_ubo)) {
+                        deref->dest.ssa.num_components = 2;
+                    } else if (deref->parent.is_ssa && deref->parent.ssa && deref->parent.ssa->num_components == 2) {
+                        deref->dest.ssa.num_components = 2;
+                    }
+                }
+            }
+        }
+    }
 }
 
 static bool lower_descriptors(nir_shader *nir,
                               const struct panvk_v9_pipeline_layout *layout) {
-    struct lower_descriptors_ctx ctx = { .layout = layout };
-    NIR_PASS_V(nir, nir_shader_instructions_pass, lower_descriptor_intrinsic,
-               nir_metadata_block_index | nir_metadata_dominance, &ctx);
-    return !ctx.unsupported;
+    struct lower_descriptors_ctx ctx = { layout, false };
+    fixup_ubo_derefs(nir);
+    bool progress = nir_shader_instructions_pass(nir,
+                                                 lower_descriptor_intrinsic,
+                                                 nir_metadata_none,
+                                                 &ctx);
+    if (ctx.unsupported) return false;
+    fixup_ubo_derefs(nir);
+    return progress || layout != NULL;
 }
 
 static bool prepare_nir(nir_shader *nir,
                         const struct panvk_v9_pipeline_layout *layout) {
-    /* Match the Vulkan runtime's canonical SPIR-V cleanup before applying
-     * Panfrost-specific lowering. In particular, returns and helper functions
-     * must not reach the Valhall backend. */
-    NIR_PASS_V(nir, nir_lower_variable_initializers, nir_var_function_temp);
-    NIR_PASS_V(nir, nir_lower_returns);
-    NIR_PASS_V(nir, nir_inline_functions);
-    NIR_PASS_V(nir, nir_copy_prop);
-    NIR_PASS_V(nir, nir_opt_deref);
+    PANVK_LOG("DEBUG: prepare_nir start, nir=%p\n", (void*)nir);
+    nir_lower_variable_initializers(nir, nir_var_function_temp);
+    nir_lower_returns(nir);
+    nir_inline_functions(nir);
+    nir_copy_prop(nir);
+    nir_opt_deref(nir);
     nir_remove_non_entrypoints(nir);
-    NIR_PASS_V(nir, nir_lower_variable_initializers, ~0);
-    NIR_PASS_V(nir, nir_split_var_copies);
-    NIR_PASS_V(nir, nir_split_per_member_structs);
-    NIR_PASS_V(nir, nir_lower_clip_cull_distance_arrays);
-    NIR_PASS_V(nir, nir_propagate_invariant, false);
+    nir_lower_variable_initializers(nir, (nir_variable_mode)~0);
+    nir_split_var_copies(nir);
+    nir_split_per_member_structs(nir);
+    nir_lower_clip_cull_distance_arrays(nir);
+    nir_propagate_invariant(nir, false);
 
-    nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
+    nir_function_impl *entrypoint = NULL;
+    nir_foreach_function(func, nir) {
+        if (func->is_entrypoint && func->impl) {
+            entrypoint = func->impl;
+            break;
+        }
+    }
     if (!entrypoint) return false;
 
-    NIR_PASS_V(nir, nir_lower_io_to_temporaries, entrypoint, true, true);
-    NIR_PASS_V(nir, nir_lower_indirect_derefs,
-               nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
-    if (!lower_descriptors(nir, layout)) return false;
-    NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_ubo,
-               nir_address_format_32bit_index_offset);
-    NIR_PASS_V(nir, nir_opt_copy_prop_vars);
-    NIR_PASS_V(nir, nir_opt_combine_stores, nir_var_all);
-    NIR_PASS_V(nir, nir_opt_trivial_continues);
-    NIR_PASS_V(nir, nir_lower_system_values);
-    NIR_PASS_V(nir, nir_split_var_copies);
-    NIR_PASS_V(nir, nir_lower_var_copies);
+    nir_lower_io_to_temporaries(nir, entrypoint, true, true);
+    nir_lower_indirect_derefs(nir, nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+    if (!lower_descriptors(nir, layout)) {
+        return false;
+    }
+    if (getenv("PANVK_DEBUG")) {
+        nir_print_shader(nir, stderr);
+    }
+    nir_lower_explicit_io(nir, nir_var_mem_ubo, nir_address_format_32bit_index_offset);
+    nir_opt_copy_prop_vars(nir);
+    nir_opt_combine_stores(nir, nir_var_all);
+    nir_opt_trivial_continues(nir);
+    nir_lower_system_values(nir);
+    nir_split_var_copies(nir);
+    nir_lower_var_copies(nir);
 
-    nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
-                                nir->info.stage);
-    nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs,
-                                nir->info.stage);
-    NIR_PASS_V(nir, nir_lower_global_vars_to_local);
+    nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs, nir->info.stage);
+    nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs, nir->info.stage);
+    nir_lower_global_vars_to_local(nir);
     nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+    PANVK_LOG("DEBUG: prepare_nir finished successfully\n");
     return true;
 }
 
@@ -213,30 +253,25 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
         if (error && error_size) snprintf(error, error_size, "invalid compiler arguments");
         return -EINVAL;
     }
-    if (!spirv_has_function_entry_point(spirv, spirv_size / sizeof(uint32_t),
-                                        stage, entry_point)) {
-        if (error && error_size)
-            snprintf(error, error_size, "SPIR-V entry point has no function body");
-        return -EINVAL;
-    }
 
+    PANVK_LOG("DEBUG: entering panvk_v9_compile_spirv stage=%d entry='%s' size=%zu\n",
+              stage, entry_point, spirv_size);
     struct compile_diagnostic diagnostic = { error, error_size };
     pthread_once(&glsl_types_once, initialize_glsl_types);
-    struct spirv_to_nir_options spirv_options = {
-        .environment = NIR_SPIRV_VULKAN,
-        .caps = {
-            .variable_pointers = true,
-        },
-        .ubo_addr_format = nir_address_format_32bit_index_offset,
-        .ssbo_addr_format = nir_address_format_64bit_global_32bit_offset,
-        .push_const_addr_format = nir_address_format_32bit_offset,
-        .shared_addr_format = nir_address_format_32bit_offset,
-        .temp_addr_format = nir_address_format_32bit_offset,
-        .debug = {
-            .func = spirv_debug,
-            .private_data = &diagnostic,
-        },
-    };
+    struct spirv_to_nir_options spirv_options;
+    memset(&spirv_options, 0, sizeof(spirv_options));
+    spirv_options.environment = NIR_SPIRV_VULKAN;
+    spirv_options.global_addr_format = nir_address_format_32bit_global;
+    spirv_options.temp_addr_format = nir_address_format_32bit_offset;
+    spirv_options.constant_addr_format = nir_address_format_32bit_offset;
+    spirv_options.task_payload_addr_format = nir_address_format_32bit_offset;
+    spirv_options.shared_addr_format = nir_address_format_32bit_offset;
+    spirv_options.push_const_addr_format = nir_address_format_32bit_offset;
+    spirv_options.ubo_addr_format = nir_address_format_32bit_index_offset;
+    spirv_options.phys_ssbo_addr_format = nir_address_format_64bit_global_32bit_offset;
+    spirv_options.ssbo_addr_format = nir_address_format_64bit_global_32bit_offset;
+    spirv_options.debug.func = spirv_debug;
+    spirv_options.debug.private_data = &diagnostic;
 
     nir_shader *nir = spirv_to_nir(spirv, spirv_size / sizeof(uint32_t),
                                     NULL, 0, (gl_shader_stage)stage,
@@ -246,6 +281,7 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
         if (!error || !error[0]) compiler_error(&diagnostic, "SPIR-V to NIR conversion failed");
         return -EINVAL;
     }
+    PANVK_LOG("DEBUG: spirv_to_nir completed successfully, nir=%p\n", (void*)nir);
 
     if (!prepare_nir(nir, layout)) {
         compiler_error(&diagnostic, "shader uses an unsupported descriptor binding");
@@ -266,6 +302,41 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
 
     bifrost_compile_shader_nir(nir, &inputs, &binary, &info);
     ralloc_free(nir);
+    PANVK_LOG("DEBUG: bifrost_compile_shader_nir completed successfully (size=%zu)\n", (size_t)binary.size);
+
+    FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
+    if (flog) {
+        fprintf(flog, "=== COMPILED SHADER STAGE %d (size=%u bytes) ===\n", stage, (unsigned)binary.size);
+        fprintf(flog, "work_reg_count=%u, tls_size=%u, preload=0x%llx, barrier=%d, ftz16=%d, ftz32=%d, outputs=0x%llx\n",
+                info.work_reg_count, info.tls_size, (unsigned long long)info.preload,
+                info.contains_barrier, info.ftz_fp16, info.ftz_fp32,
+                (unsigned long long)info.outputs_written);
+        fprintf(flog, "attributes_read_count=%u, attribute_count=%u, ubo_count=%u, ubo_mask=0x%x\n",
+                info.attributes_read_count, info.attribute_count, info.ubo_count, info.ubo_mask);
+        fprintf(flog, "varyings: input_count=%u, output_count=%u\n",
+                info.varyings.input_count, info.varyings.output_count);
+        for (unsigned i = 0; i < info.varyings.input_count; i++) {
+            fprintf(flog, "  var in[%u]: location=%d, format=%d\n",
+                    i, info.varyings.input[i].location, info.varyings.input[i].format);
+        }
+        for (unsigned i = 0; i < info.varyings.output_count; i++) {
+            fprintf(flog, "  var out[%u]: location=%d, format=%d\n",
+                    i, info.varyings.output[i].location, info.varyings.output[i].format);
+        }
+        if (stage == PANVK_V9_SHADER_VERTEX) {
+            fprintf(flog, "VS: idvs=%d, secondary_enable=%d, sec_offset=%u, sec_work_regs=%u, sec_preload=0x%llx\n",
+                    info.vs.idvs, info.vs.secondary_enable, info.vs.secondary_offset,
+                    info.vs.secondary_work_reg_count, (unsigned long long)info.vs.secondary_preload);
+        }
+        if (stage == PANVK_V9_SHADER_FRAGMENT) {
+            fprintf(flog, "FS: writes_depth=%d, writes_stencil=%d, can_discard=%d, reads_coord=%d, reads_face=%d\n",
+                    info.fs.writes_depth, info.fs.writes_stencil, info.fs.can_discard,
+                    info.fs.reads_frag_coord, info.fs.reads_face);
+        }
+        fprintf(flog, "===============================================\n");
+        fflush(flog);
+        fclose(flog);
+    }
 
     if (!binary.size) {
         compiler_error(&diagnostic, "Valhall compiler produced an empty binary");

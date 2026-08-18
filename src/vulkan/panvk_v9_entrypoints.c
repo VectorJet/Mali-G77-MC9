@@ -16,6 +16,7 @@
 #include "panvk_v9_compiler.h"
 
 #define ICD_LOADER_MAGIC 0x01CDC0DEu
+#define PANVK_LOG(...) do { if (getenv("PANVK_DEBUG")) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
 
 static inline void set_loader_magic(void *object) {
     *(uintptr_t *)object = ICD_LOADER_MAGIC;
@@ -343,7 +344,7 @@ VkResult vkCreateInstance(const struct VkInstanceCreateInfo *pCreateInfo, void *
 
     if (pCreateInfo && pCreateInfo->ppEnabledExtensionNames) {
         for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-            printf("DEBUG: vkCreateInstance requested extension: '%s'\n", pCreateInfo->ppEnabledExtensionNames[i]);
+            PANVK_LOG("DEBUG: vkCreateInstance requested extension: '%s'\n", pCreateInfo->ppEnabledExtensionNames[i]);
         }
     }
 
@@ -743,6 +744,18 @@ VkResult vkCreateShaderModule(VkDevice device, const struct VkShaderModuleCreate
     }
     memcpy(sm->code, pCreateInfo->pCode, sm->code_size);
 
+    if (pCreateInfo->codeSize > 40) {
+        static int g_shader_count = 0;
+        char dump_path[256];
+        snprintf(dump_path, sizeof(dump_path), "/data/data/com.termux/files/home/captured_vkmark_shader_%d.spv", g_shader_count++);
+        FILE *fspv = fopen(dump_path, "wb");
+        if (fspv) {
+            fwrite(pCreateInfo->pCode, 1, pCreateInfo->codeSize, fspv);
+            fclose(fspv);
+            PANVK_LOG("DEBUG: dumped %zu bytes of SPIR-V to %s (stage_mask=0x%x)\n", pCreateInfo->codeSize, dump_path, stage_mask);
+        }
+    }
+
     *pShaderModule = sm;
     return VK_SUCCESS;
 }
@@ -1004,11 +1017,19 @@ static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
             continue;
         }
 
+        if (!stage || !stage->module || !stage->module->code || stage->module->code_size <= 40) {
+            continue;
+        }
+
+        fprintf(stderr, "DEBUG: calling compiler_api.compile for stage=%d code_size=%zu pName='%s'...\n",
+                compiler_stage, stage->module->code_size, stage->pName ? stage->pName : "NULL");
+
         int ret = compiler_api.compile(stage->module->code, stage->module->code_size,
-                                       compiler_stage, stage->pName,
+                                       compiler_stage, stage->pName ? stage->pName : "main",
                                        &pipeline->compiler_layout,
                                        binary,
                                        error, sizeof(error));
+        fprintf(stderr, "DEBUG: compiler_api.compile returned ret=%d err='%s'\n", ret, error);
         FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
         if (flog) {
             fprintf(flog, "compile stage=%d ret=%d code_size=%zu err='%s'\n",
@@ -1120,6 +1141,7 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
                                    uint32_t createInfoCount,
                                    const struct VkGraphicsPipelineCreateInfo *pCreateInfos,
                                    void *pAllocator, VkPipeline *pPipelines) {
+    PANVK_LOG("DEBUG: entering vkCreateGraphicsPipelines count=%u\n", createInfoCount);
     if (!device || !pCreateInfos || !pPipelines) return VK_ERROR_INITIALIZATION_FAILED;
     for (uint32_t i = 0; i < createInfoCount; i++) pPipelines[i] = NULL;
 
@@ -1128,10 +1150,12 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
         VkResult result = pipeline_copy_layout(pipe, pCreateInfos[i].layout);
-        if (result == VK_SUCCESS)
+        if (result == VK_SUCCESS) {
             result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
-        if (result == VK_SUCCESS)
+        }
+        if (result == VK_SUCCESS) {
             result = pipeline_compile_shaders(pipe, &pCreateInfos[i]);
+        }
         if (result != VK_SUCCESS) {
             pipeline_cleanup(pipe);
             for (uint32_t j = 0; j < i; j++) {
@@ -1142,6 +1166,7 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         }
         pipeline_parse_fixed_state(pipe, &pCreateInfos[i]);
         pPipelines[i] = pipe;
+        PANVK_LOG("DEBUG: pipeline created successfully\n");
     }
     return VK_SUCCESS;
 }
@@ -1410,6 +1435,9 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
             break;
         }
     }
+    PANVK_LOG("DEBUG: apply_ubos: count=%u addr0=0x%llx size0=%u\n",
+              ubo_count, (unsigned long long)(ubo_count ? ubos[0].address : 0),
+              ubo_count ? ubos[0].size : 0);
     v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
 }
 
@@ -1467,6 +1495,9 @@ static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
         };
         attr_count = 1;
     }
+    PANVK_LOG("DEBUG: apply_attrs: count=%u fmt0=0x%x stride0=%u addr0=0x%llx size0=%u\n",
+              attr_count, attrs[0].format, attrs[0].stride,
+              (unsigned long long)attrs[0].buffer_address, attrs[0].buffer_size);
     v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
 }
 
@@ -1482,10 +1513,7 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->vertex_binary);
             }
-            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size &&
-                (!getenv("PANVK_EXPERIMENT_MV11_POSITION") ||
-                 (commandBuffer->graphics_pipeline->vertex_binary.secondary_enable &&
-                  getenv("PANVK_EXPERIMENT_MV11_VARYING")))) {
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
                 v9_cmd_buffer_set_fragment_shader(
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->fragment_binary);
@@ -1496,8 +1524,7 @@ void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t ins
                            commandBuffer->vertex_bindings[0].buffer->memory_offset +
                            commandBuffer->vertex_bindings[0].offset + (firstVertex * 16) :
                            v9_cmd_buffer_get_pos_gpu(commandBuffer->v9_cmd);
-        uint64_t idx_gpu = getenv("PANVK_EXPERIMENT_MV11_POSITION") ? 0 :
-                           v9_cmd_buffer_get_idx_gpu(commandBuffer->v9_cmd);
+        uint64_t idx_gpu = 0;
         v9_cmd_draw_indexed(commandBuffer->v9_cmd, idx_gpu, vertexCount, 0,
                             pos_gpu, vertexCount);
     }
@@ -1545,10 +1572,7 @@ void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->vertex_binary);
             }
-            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size &&
-                (!getenv("PANVK_EXPERIMENT_MV11_POSITION") ||
-                 (commandBuffer->graphics_pipeline->vertex_binary.secondary_enable &&
-                  getenv("PANVK_EXPERIMENT_MV11_VARYING")))) {
+            if (commandBuffer->graphics_pipeline->fragment_binary.binary_size) {
                 v9_cmd_buffer_set_fragment_shader(
                     commandBuffer->v9_cmd,
                     &commandBuffer->graphics_pipeline->fragment_binary);
@@ -1835,23 +1859,32 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
         if (last_cmd) {
             uint32_t *dst = (uint32_t *)sc->image_data;
-            uint64_t nonzero_pixels = 0;
-            uint32_t first_pixel = 0;
+            uint64_t zero_count = 0;
+            uint64_t opaque_black_count = 0;
+            uint64_t other_count = 0;
+            uint32_t first_other_pixel = 0;
             for (uint32_t y = 0; y < sc->height; y++) {
                 for (uint32_t x = 0; x < sc->width; x++) {
                     uint32_t pixel = v9_cmd_buffer_read_pixel(last_cmd, x, y);
                     dst[y * sc->width + x] = pixel;
-                    if (x == 0 && y == 0) first_pixel = pixel;
-                    nonzero_pixels += pixel != 0;
+                    if (pixel == 0) {
+                        zero_count++;
+                    } else if (pixel == 0xff000000) {
+                        opaque_black_count++;
+                    } else {
+                        other_count++;
+                        if (!first_other_pixel) first_other_pixel = pixel;
+                    }
                 }
             }
             if (getenv("PANVK_PRESENT_DEBUG")) {
                 fprintf(stderr,
-                        "panvk present: image=%u size=%ux%u first=0x%08x nonzero=%llu/%llu\n",
-                        pPresentInfo->pImageIndices ? pPresentInfo->pImageIndices[0] : 0,
-                        sc->width, sc->height, first_pixel,
-                        (unsigned long long)nonzero_pixels,
-                        (unsigned long long)sc->width * sc->height);
+                        "panvk present: size=%ux%u zero=%llu opaque_black(0xff000000)=%llu other=%llu other_sample=0x%08x\n",
+                        sc->width, sc->height,
+                        (unsigned long long)zero_count,
+                        (unsigned long long)opaque_black_count,
+                        (unsigned long long)other_count,
+                        first_other_pixel);
             }
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {

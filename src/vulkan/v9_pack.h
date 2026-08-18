@@ -26,7 +26,7 @@ static inline void v9_pack_blend(uint32_t *bl) {
             ((2u << 0) | (2u << 4) | (1u << 8)) << 12 | /* Alpha: same */
             (0xFu << 28);                               /* Color Mask = RGBA */
     bl[2] = (2u << 0) | (3u << 3) | (0u << 16);         /* Mode=2, num_comps-1=3, RT=0 */
-    bl[3] = (237u << 12) | 0u;                          /* Conversion: RGBA8_TB | RGBA */
+    bl[3] = (237u << 12) | (1u << 24);                  /* Conversion: RGBA8_TB | F32 */
 }
 
 static inline void v9_pack_tls(uint32_t *ls, uint64_t tls_base) {
@@ -47,7 +47,7 @@ static inline void v9_pack_shader_program(uint32_t *sp, uint64_t isa_gpu,
                                           uint32_t stage, uint32_t work_reg_count, uint64_t preload,
                                           bool primary_shader, bool contains_barrier,
                                           bool ftz_fp16, bool ftz_fp32) {
-    memset(sp, 0, 16);
+    memset(sp, 0, 32);
     uint32_t register_allocation = work_reg_count <= 32 ? 2u : 0u;
     uint32_t ftz_mode = ftz_fp32 ? (ftz_fp16 ? 2u : 1u) : 0u;
     sp[0] = (8u << 0) | ((stage & 0xFu) << 4) |
@@ -120,9 +120,10 @@ static inline void v9_pack_rt0(uint32_t *rt0, uint64_t color_gpu, uint32_t width
 }
 
 static inline void v9_pack_mfbd(uint32_t *mfbd, uint32_t width, uint32_t height,
-                                uint64_t dcd_gpu, uint64_t tiler_ctx_gpu, uint64_t sampleloc_gpu) {
+                                uint64_t dcd_gpu, uint64_t tiler_ctx_gpu, uint64_t sampleloc_gpu,
+                                bool pre_frame) {
     memset(mfbd, 0, 128);
-    mfbd[0] = 1;
+    mfbd[0] = pre_frame ? 1 : 0;
     pack_u64(mfbd + 4, sampleloc_gpu);
     pack_u64(mfbd + 6, dcd_gpu);
     uint32_t *params = mfbd + 8;

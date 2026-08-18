@@ -173,7 +173,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
 
     /* MFBD & DCD 1 */
     v9_pack_mfbd((uint32_t *)(base_cpu + 0x6000), config->width, config->height,
-                 cmd->dcd_gpu, cmd->tiler_ctx_gpu, cmd->sampleloc_gpu);
+                 cmd->dcd_gpu, cmd->tiler_ctx_gpu, cmd->sampleloc_gpu, true);
     v9_pack_dcd((uint32_t *)(base_cpu + (cmd->dcd_gpu - base_gva)),
                 cmd->depth_gpu, cmd->blend_gpu, cmd->res_gpu, cmd->sp_gpu, cmd->tls_gpu);
 
@@ -246,7 +246,7 @@ int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
     memcpy(cmd->exec_vs_bo->cpu, shader->binary, shader->binary_size);
     uint8_t *base_cpu = cmd->mem_bo->cpu;
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_vertex_gpu - cmd->mem_bo->gpu)),
-                           cmd->isa_vertex_gpu + shader->no_psiz_offset, 3,
+                           cmd->isa_vertex_gpu, 3,
                            shader->work_reg_count, shader->preload,
                            false, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
@@ -259,9 +259,10 @@ int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
             shader->ftz_fp16, shader->ftz_fp32);
     }
     cmd->has_vertex_shader = true;
-    cmd->has_varying_shader = shader->secondary_enable &&
-                              getenv("PANVK_EXPERIMENT_MV11_VARYING");
-    cmd->use_malloc_vertex = getenv("PANVK_EXPERIMENT_MV11_POSITION") && shader->idvs;
+    cmd->has_varying_shader = shader->secondary_enable;
+    cmd->use_malloc_vertex = shader->idvs;
+    uint32_t *mfbd = (uint32_t *)(base_cpu + 0x6000);
+    mfbd[0] = 0; /* Rasterize geometry tiles directly */
     return 0;
 }
 
@@ -286,7 +287,7 @@ int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
     uint8_t *base_cpu = cmd->mem_bo->cpu;
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - cmd->mem_bo->gpu)),
                            cmd->isa_gpu, 2, shader->work_reg_count, shader->preload,
-                           true, shader->contains_barrier,
+                           false, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
     return 0;
 }
@@ -312,7 +313,7 @@ int v9_cmd_buffer_set_ubos(struct v9_cmd_buffer *cmd,
     }
 
     uint32_t *resources = (uint32_t *)(base_cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
-    memset(resources, 0, 12 * 16);
+    memset(resources, 0, 16);
     if (descriptor_count)
         v9_pack_resource(resources, cmd->ubo_gpu, descriptor_count * 32);
     return 0;
@@ -349,9 +350,11 @@ int v9_cmd_draw_indexed(struct v9_cmd_buffer *cmd,
     if (!cmd || !cmd->mem_bo) return -EINVAL;
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
-    printf("v9_cmd_draw_indexed: idx_gpu=0x%llx, index_count=%u, index_type=%u, pos_gpu=0x%llx, vertex_count=%u, has_vs=%d\n",
-           (unsigned long long)idx_gpu, index_count, index_type,
-           (unsigned long long)pos_gpu, vertex_count, cmd->has_vertex_shader);
+    if (getenv("PANVK_DEBUG")) {
+        fprintf(stderr, "v9_cmd_draw_indexed: idx_gpu=0x%llx, index_count=%u, index_type=%u, pos_gpu=0x%llx, vertex_count=%u, has_vs=%d\n",
+                (unsigned long long)idx_gpu, index_count, index_type,
+                (unsigned long long)pos_gpu, vertex_count, cmd->has_vertex_shader);
+    }
 
     v9_pack_tiler_job((uint32_t *)(base_cpu + (cmd->tiler_job_gpu - cmd->mem_bo->gpu)),
                       cmd->config.width, cmd->config.height,
@@ -403,8 +406,7 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
     uint32_t *fj2 = (uint32_t *)(base_cpu + (cmd->frag_jc2_gpu - cmd->mem_bo->gpu));
     v9_pack_frag_job_chain(fj1, fj2, cmd->mfbd_gva, cmd->mfbd2_gpu, cmd->frag_jc2_gpu,
                            cmd->config.width, cmd->config.height);
-    if (cmd->use_malloc_vertex)
-        pack_u64(fj1 + 6, cmd->frag_jc2_gpu);
+    pack_u64(fj1 + 6, 0);
 
     if (!cmd->has_draw_command) {
         v9_cmd_draw_indexed_triangle(cmd);
