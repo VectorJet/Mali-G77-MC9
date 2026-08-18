@@ -39,7 +39,16 @@ int main(int argc, char **argv) {
         PANVK_V9_SHADER_VERTEX : PANVK_V9_SHADER_FRAGMENT;
     struct panvk_v9_compiled_shader shader;
     char error[512];
-    int ret = panvk_v9_compile_spirv(spirv, spirv_size, stage, "main", NULL,
+    struct panvk_v9_descriptor_binding bindings[] = {
+        { .set = 0, .binding = 0, .descriptor_type = 6 /* UNIFORM_BUFFER */, .array_size = 1, .resource_index = 0 },
+        { .set = 0, .binding = 1, .descriptor_type = 6 /* UNIFORM_BUFFER */, .array_size = 1, .resource_index = 1 },
+    };
+    struct panvk_v9_pipeline_layout layout = {
+        .bindings = bindings,
+        .binding_count = sizeof(bindings) / sizeof(bindings[0]),
+        .ubo_count = 2,
+    };
+    int ret = panvk_v9_compile_spirv(spirv, spirv_size, stage, "main", &layout,
                                      &shader, error, sizeof(error));
     free(spirv);
     if (ret) {

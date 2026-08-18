@@ -332,14 +332,16 @@ int v9_cmd_buffer_set_attributes(struct v9_cmd_buffer *cmd,
 
     for (uint32_t i = 0; i < binding_count && i < 8; i++) {
         v9_pack_buffer(attr_bufs + i * 8, bindings[i].buffer_address, bindings[i].buffer_size);
-        v9_pack_attribute(attrs + i * 8, bindings[i].format, 1, bindings[i].offset,
+        v9_pack_attribute(attrs + i * 8, bindings[i].format, 2, bindings[i].offset,
                           i, bindings[i].stride, bindings[i].input_rate);
     }
 
     uint32_t *resources = (uint32_t *)(base_cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
     if (binding_count > 0) {
-        v9_pack_resource(resources + 4, cmd->attr_buf_gpu, binding_count * 32);
-        v9_pack_resource(resources + 8, cmd->attr_gpu, binding_count * 32);
+        /* Table 1: PAN_TABLE_ATTRIBUTE -> Attribute descriptors */
+        v9_pack_resource(resources + 4, cmd->attr_gpu, binding_count * 32);
+        /* Table 2: PAN_TABLE_ATTRIBUTE_BUFFER -> Attribute Buffer descriptors */
+        v9_pack_resource(resources + 8, cmd->attr_buf_gpu, binding_count * 32);
     }
     return 0;
 }

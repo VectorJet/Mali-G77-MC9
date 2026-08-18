@@ -77,6 +77,7 @@ struct VkSurfaceKHR_T {
     uint32_t window;
     uint32_t width;
     uint32_t height;
+    uint8_t depth;
     bool is_xcb;
 };
 
@@ -1673,6 +1674,7 @@ VkResult vkCreateXcbSurfaceKHR(VkInstance instance, const struct VkXcbSurfaceCre
         if (reply) {
             surf->width = reply->width;
             surf->height = reply->height;
+            surf->depth = reply->depth;
             free(reply);
         }
     }
@@ -1888,9 +1890,10 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
             }
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
+            uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
             xcb_put_image(sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
                           sc->surface->window, sc->xcb_gc,
-                          sc->width, sc->height, 0, 0, 0, 24,
+                          sc->width, sc->height, 0, 0, 0, depth,
                           sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
             xcb_flush(sc->surface->connection);
         } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {

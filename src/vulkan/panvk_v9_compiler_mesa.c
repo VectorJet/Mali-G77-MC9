@@ -9,13 +9,91 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <stdarg.h>
+#include <fcntl.h>
+#include <ctype.h>
 
 #include "panvk_v9_compiler.h"
 
-/* GLIBC compatibility globals for Bionic */
+/* GLIBC compatibility globals and shims for Bionic */
 char *program_invocation_name = (char *)"vkmark";
 char *program_invocation_short_name = (char *)"vkmark";
+
+void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function) {
+    fprintf(stderr, "assertion failed: %s at %s:%u in %s\n", assertion, file, line, function ? function : "?");
+    abort();
+}
+
+long int __isoc23_strtol(const char *nptr, char **endptr, int base) {
+    return strtol(nptr, endptr, base);
+}
+
+int __isoc23_sscanf(const char *s, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int ret = vsscanf(s, format, ap);
+    va_end(ap);
+    return ret;
+}
+
+int fcntl64(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    return fcntl(fd, cmd, arg);
+}
+
+struct panvk_qsort_r_data {
+    void *arg;
+    int (*compar)(const void *, const void *, void *);
+};
+static __thread struct panvk_qsort_r_data g_panvk_qsort_data;
+static int panvk_qsort_r_thunk(const void *a, const void *b) {
+    return g_panvk_qsort_data.compar(a, b, g_panvk_qsort_data.arg);
+}
+void qsort_r(void *base, size_t nmemb, size_t size,
+             int (*compar)(const void *, const void *, void *),
+             void *arg) {
+    g_panvk_qsort_data.arg = arg;
+    g_panvk_qsort_data.compar = compar;
+    qsort(base, nmemb, size, panvk_qsort_r_thunk);
+}
+
+static const unsigned short g_panvk_ctype_b[384] = {
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002,
+    0x2002, 0x3003, 0x3003, 0x3003, 0x3003, 0x3003, 0x2002, 0x2002,
+    0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002,
+    0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002, 0x2002,
+    0x3008, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800,
+    0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800,
+    0x0804, 0x0804, 0x0804, 0x0804, 0x0804, 0x0804, 0x0804, 0x0804,
+    0x0804, 0x0804, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800,
+    0x1800, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101,
+    0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101,
+    0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101, 0x0101,
+    0x0101, 0x0101, 0x0101, 0x1800, 0x1800, 0x1800, 0x1800, 0x1800,
+    0x1800, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201,
+    0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201,
+    0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201, 0x0201,
+    0x0201, 0x0201, 0x0201, 0x1800, 0x1800, 0x1800, 0x1800, 0x2002,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+static const unsigned short *g_panvk_ctype_ptr = g_panvk_ctype_b + 128;
+const unsigned short **__ctype_b_loc(void) {
+    return &g_panvk_ctype_ptr;
+}
+
+int *__errno_location(void) {
+    return __errno();
+}
 
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
@@ -122,6 +200,31 @@ static bool lower_descriptor_intrinsic(nir_builder *builder,
         }
         return false;
     }
+    if (instruction->type == nir_instr_type_tex) {
+        nir_tex_instr *tex = nir_instr_as_tex(instruction);
+        int tex_deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+        int samp_deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+        if (tex_deref_idx >= 0) {
+            nir_deref_instr *deref = nir_src_as_deref(tex->src[tex_deref_idx].src);
+            if (deref && deref->var) {
+                const struct panvk_v9_descriptor_binding *binding =
+                    find_descriptor_binding(ctx->layout, deref->var->data.descriptor_set, deref->var->data.binding);
+                tex->texture_index = binding ? binding->resource_index : 0;
+            }
+            nir_tex_instr_remove_src(tex, tex_deref_idx);
+        }
+        samp_deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+        if (samp_deref_idx >= 0) {
+            nir_deref_instr *deref = nir_src_as_deref(tex->src[samp_deref_idx].src);
+            if (deref && deref->var) {
+                const struct panvk_v9_descriptor_binding *binding =
+                    find_descriptor_binding(ctx->layout, deref->var->data.descriptor_set, deref->var->data.binding);
+                tex->sampler_index = binding ? binding->resource_index : 0;
+            }
+            nir_tex_instr_remove_src(tex, samp_deref_idx);
+        }
+        return false;
+    }
     if (instruction->type != nir_instr_type_intrinsic) return false;
     nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instruction);
     builder->cursor = nir_before_instr(instruction);
@@ -181,13 +284,13 @@ static bool lower_descriptors(nir_shader *nir,
                               const struct panvk_v9_pipeline_layout *layout) {
     struct lower_descriptors_ctx ctx = { layout, false };
     fixup_ubo_derefs(nir);
-    bool progress = nir_shader_instructions_pass(nir,
-                                                 lower_descriptor_intrinsic,
-                                                 nir_metadata_none,
-                                                 &ctx);
+    nir_shader_instructions_pass(nir,
+                                 lower_descriptor_intrinsic,
+                                 nir_metadata_none,
+                                 &ctx);
     if (ctx.unsupported) return false;
     fixup_ubo_derefs(nir);
-    return progress || layout != NULL;
+    return true;
 }
 
 static bool prepare_nir(nir_shader *nir,
@@ -219,6 +322,14 @@ static bool prepare_nir(nir_shader *nir,
     if (!lower_descriptors(nir, layout)) {
         return false;
     }
+    nir_lower_tex_options lower_tex_options = {
+        .lower_txs_lod = true,
+        .lower_txp = ~0,
+        .lower_tg4_broadcom_swizzle = true,
+        .lower_txd = true,
+        .lower_invalid_implicit_lod = true,
+    };
+    nir_lower_tex(nir, &lower_tex_options);
     if (getenv("PANVK_DEBUG")) {
         nir_print_shader(nir, stderr);
     }
@@ -292,7 +403,7 @@ int panvk_v9_compile_spirv(const uint32_t *spirv, size_t spirv_size,
     struct panfrost_compile_inputs inputs = {
         .gpu_id = MALI_G77_GPU_ID,
         .fixed_sysval_ubo = -1,
-        .no_idvs = stage != PANVK_V9_SHADER_VERTEX,
+        .no_idvs = false,
         .no_ubo_to_push = true,
         .nr_cbufs = stage == PANVK_V9_SHADER_FRAGMENT ? 1 : 0,
     };
