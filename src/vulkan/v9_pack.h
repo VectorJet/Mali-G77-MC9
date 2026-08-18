@@ -71,7 +71,7 @@ static inline void v9_pack_attribute(uint32_t *attr, uint32_t format, uint32_t t
                                      uint32_t offset, uint32_t buffer_index,
                                      uint32_t stride, uint32_t input_rate) {
     memset(attr, 0, 32);
-    attr[0] = (5u << 0) | (0u << 4) | (1u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Offset enable=1 */
+    attr[0] = (5u << 0) | (1u << 4) | (1u << 8) | ((format & 0x3FFFFFu) << 10); /* Type=5 (Attribute), Type=1 (1D), Offset enable=1 */
     attr[1] = (table & 0x3Fu) |
               ((input_rate ? MALI_ATTRIBUTE_DIVISOR_RATE_INSTANCE :
                              MALI_ATTRIBUTE_DIVISOR_RATE_VERTEX) << 6);
@@ -143,7 +143,7 @@ static inline void v9_pack_dcd(uint32_t *dcd, uint64_t depth_gpu, uint64_t blend
     dcd[7] = 0x3F800000;
     pack_u64(dcd + 10, depth_gpu);
     pack_u64(dcd + 12, 1ULL | blend_gpu);
-    pack_u64(dcd + 24, 1ULL | res_gpu);
+    pack_u64(dcd + 24, 12ULL | res_gpu);
     pack_u64(dcd + 26, sp_gpu);
     pack_u64(dcd + 28, tls_gpu);
     pack_u64(dcd + 30, 0);
@@ -201,7 +201,7 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
     uint32_t *se = dw + 16;
     se[0] = 0;
     se[1] = 0;
-    pack_u64(se + 8, 1ULL | res_gpu);
+    pack_u64(se + 8, 12ULL | res_gpu);
     pack_u64(se + 10, sp_gpu);
     pack_u64(se + 12, tls_gpu);
     pack_u64(se + 14, 0);

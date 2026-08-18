@@ -798,6 +798,8 @@ VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCr
 
     uint32_t index = 0;
     uint32_t ubo_index = 0;
+    uint32_t tex_index = 0;
+    uint32_t sampler_index = 0;
     for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
         VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
         if (!set_layout) continue;
@@ -812,6 +814,13 @@ VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCr
                 binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
                 out->resource_index = ubo_index;
                 ubo_index += binding->descriptorCount;
+            } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                       binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+                out->resource_index = tex_index;
+                tex_index += binding->descriptorCount;
+            } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+                out->resource_index = sampler_index;
+                sampler_index += binding->descriptorCount;
             }
         }
     }
@@ -1907,15 +1916,27 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         }
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
             uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
-            xcb_drawable_t target = sc->xcb_pixmap ? sc->xcb_pixmap : sc->surface->window;
-            xcb_put_image(
+            xcb_void_cookie_t c1 = xcb_put_image_checked(
                 sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                target, sc->xcb_gc,
+                sc->xcb_pixmap ? sc->xcb_pixmap : sc->surface->window, sc->xcb_gc,
                 sc->width, sc->height, 0, 0, 0, depth,
                 sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
+            xcb_generic_error_t *err1 = xcb_request_check(sc->surface->connection, c1);
+            if (err1) {
+                fprintf(stderr, "XCB ERROR: put_image error=%u major=%u minor=%u depth=%u\n",
+                        err1->error_code, err1->major_code, err1->minor_code, depth);
+                free(err1);
+            }
             if (sc->xcb_pixmap) {
-                xcb_copy_area(sc->surface->connection, sc->xcb_pixmap, sc->surface->window,
-                              sc->xcb_gc, 0, 0, 0, 0, sc->width, sc->height);
+                xcb_void_cookie_t c2 = xcb_copy_area_checked(
+                    sc->surface->connection, sc->xcb_pixmap, sc->surface->window,
+                    sc->xcb_gc, 0, 0, 0, 0, sc->width, sc->height);
+                xcb_generic_error_t *err2 = xcb_request_check(sc->surface->connection, c2);
+                if (err2) {
+                    fprintf(stderr, "XCB ERROR: copy_area error=%u major=%u minor=%u\n",
+                            err2->error_code, err2->major_code, err2->minor_code);
+                    free(err2);
+                }
             }
             xcb_flush(sc->surface->connection);
         } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {

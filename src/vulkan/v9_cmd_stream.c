@@ -93,6 +93,12 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
         return NULL;
     }
     memset(cmd->mem_bo->cpu, 0, mem_size);
+    if (cmd->color_bo && cmd->color_bo->cpu) {
+        uint32_t *cptr = (uint32_t *)cmd->color_bo->cpu;
+        uint32_t ccount = config->width * config->height;
+        uint32_t cc = config->clear_color ? config->clear_color : 0xFF000000u;
+        for (uint32_t i = 0; i < ccount; i++) cptr[i] = cc;
+    }
 
     cmd->exec_bo = pan_kmod_bo_alloc(dev, 4096,
                                      PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE | PAN_KMOD_BO_FLAG_EXEC);
@@ -248,7 +254,7 @@ int v9_cmd_buffer_set_vertex_shader(struct v9_cmd_buffer *cmd,
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_vertex_gpu - cmd->mem_bo->gpu)),
                            cmd->isa_vertex_gpu, 3,
                            shader->work_reg_count, shader->preload,
-                           false, shader->contains_barrier,
+                           true, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
     if (shader->secondary_enable) {
         v9_pack_shader_program(
@@ -287,7 +293,7 @@ int v9_cmd_buffer_set_fragment_shader(struct v9_cmd_buffer *cmd,
     uint8_t *base_cpu = cmd->mem_bo->cpu;
     v9_pack_shader_program((uint32_t *)(base_cpu + (cmd->sp_gpu - cmd->mem_bo->gpu)),
                            cmd->isa_gpu, 2, shader->work_reg_count, shader->preload,
-                           false, shader->contains_barrier,
+                           true, shader->contains_barrier,
                            shader->ftz_fp16, shader->ftz_fp32);
     return 0;
 }
