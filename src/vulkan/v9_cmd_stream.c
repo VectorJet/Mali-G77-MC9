@@ -809,3 +809,8 @@ uint32_t v9_cmd_buffer_read_pixel(struct v9_cmd_buffer *cmd, uint32_t x, uint32_
     uint32_t *color = (uint32_t *)cmd->color_bo->cpu;
     return color[y * cmd->config.width + x];
 }
+
+void *v9_cmd_buffer_get_color_cpu(struct v9_cmd_buffer *cmd) {
+    if (!cmd || !cmd->color_bo) return NULL;
+    return cmd->color_bo->cpu;
+}

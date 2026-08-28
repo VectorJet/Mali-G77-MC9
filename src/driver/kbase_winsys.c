@@ -18,7 +18,7 @@
 #define KBASE_IOCTL_SET_FLAGS      _IOC(_IOC_WRITE, 0x80, 1, 4)
 #define KBASE_IOCTL_JOB_SUBMIT     _IOC(_IOC_WRITE, 0x80, 2, 16)
 #define KBASE_IOCTL_MEM_ALLOC      _IOC(_IOC_READ|_IOC_WRITE, 0x80, 5, 32)
-#define KBASE_IOCTL_MEM_FREE       _IOC(_IOC_WRITE, 0x80, 6, 8)
+#define KBASE_IOCTL_MEM_FREE       _IOC(_IOC_WRITE, 0x80, 7, 8)
 
 #define BASE_CONTEXT_CREATE_KERNEL_FLAGS (1u << 0)
 #define BASE_MEM_SAME_VA                 (1u << 16)
@@ -244,8 +244,12 @@ struct kbase_bo *kbase_bo_import_dma_buf(struct kbase_dev *dev, int dma_buf_fd, 
 
 void kbase_bo_free(struct kbase_bo *bo) {
     if (!bo) return;
-    if (bo->cpu && bo->size > 0) munmap(bo->cpu, bo->size);
-    if (bo->gpu_map && bo->gpu_map_size > 0)
+    if (bo->dev && bo->dev->fd >= 0 && bo->gpu > 0) {
+        uint64_t gpu_addr = bo->gpu;
+        ioctl(bo->dev->fd, KBASE_IOCTL_MEM_FREE, &gpu_addr);
+    }
+    if (bo->cpu && bo->size > 0 && bo->cpu != MAP_FAILED) munmap(bo->cpu, bo->size);
+    if (bo->gpu_map && bo->gpu_map_size > 0 && bo->gpu_map != MAP_FAILED)
         munmap(bo->gpu_map, bo->gpu_map_size);
     free(bo);
 }

@@ -2841,60 +2841,20 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
     if (!pPresentInfo || pPresentInfo->swapchainCount == 0) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkSwapchainKHR sc = pPresentInfo->pSwapchains[0];
-    if (sc && sc->surface && sc->image_data) {
+    if (sc && sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->image_data) {
         struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
-        if (last_cmd) {
-            uint32_t *dst = (uint32_t *)sc->image_data;
-            uint64_t bg_count = 0;
-            uint64_t geom_count = 0;
-            uint32_t first_geom_pixel = 0;
-            for (uint32_t y = 0; y < sc->height; y++) {
-                for (uint32_t x = 0; x < sc->width; x++) {
-                    uint32_t pixel = v9_cmd_buffer_read_pixel(last_cmd, x, y);
-                    /* Force 100% opacity so compositor does not blend through to desktop grid */
-                    uint32_t x11_pixel = pixel | 0xFF000000u;
-                    dst[y * sc->width + x] = x11_pixel;
-                    if ((pixel & 0xFFFFFF) == 0x333333) {
-                        bg_count++;
-                    } else {
-                        geom_count++;
-                        if (!first_geom_pixel) first_geom_pixel = pixel;
-                    }
-                }
-            }
-            if (getenv("PANVK_PRESENT_DEBUG")) {
-                fprintf(stderr,
-                        "panvk present: size=%ux%u bg(0x333333)=%llu geom=%llu sample_geom=0x%08x\n",
-                        sc->width, sc->height,
-                        (unsigned long long)bg_count,
-                        (unsigned long long)geom_count,
-                        first_geom_pixel);
-            }
+        void *color_cpu = last_cmd ? v9_cmd_buffer_get_color_cpu(last_cmd) : NULL;
+        if (color_cpu) {
+            memcpy(sc->image_data, color_cpu, sc->width * sc->height * 4);
         }
+
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
             uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
-            xcb_void_cookie_t c1 = xcb_put_image_checked(
+            xcb_put_image(
                 sc->surface->connection, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                sc->xcb_pixmap ? sc->xcb_pixmap : sc->surface->window, sc->xcb_gc,
+                sc->surface->window, sc->xcb_gc ? sc->xcb_gc : 0,
                 sc->width, sc->height, 0, 0, 0, depth,
                 sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
-            xcb_generic_error_t *err1 = xcb_request_check(sc->surface->connection, c1);
-            if (err1) {
-                fprintf(stderr, "XCB ERROR: put_image error=%u major=%u minor=%u depth=%u\n",
-                        err1->error_code, err1->major_code, err1->minor_code, depth);
-                free(err1);
-            }
-            if (sc->xcb_pixmap) {
-                xcb_void_cookie_t c2 = xcb_copy_area_checked(
-                    sc->surface->connection, sc->xcb_pixmap, sc->surface->window,
-                    sc->xcb_gc, 0, 0, 0, 0, sc->width, sc->height);
-                xcb_generic_error_t *err2 = xcb_request_check(sc->surface->connection, c2);
-                if (err2) {
-                    fprintf(stderr, "XCB ERROR: copy_area error=%u major=%u minor=%u\n",
-                            err2->error_code, err2->major_code, err2->minor_code);
-                    free(err2);
-                }
-            }
             xcb_flush(sc->surface->connection);
         } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {
             XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
@@ -3459,6 +3419,21 @@ VkResult vkCreateWaylandSurfaceKHR(VkInstance instance, const void *pCreateInfo,
     if (!surf) return VK_ERROR_OUT_OF_HOST_MEMORY;
     surf->width = 1280;
     surf->height = 720;
+
+    int screen_num = 0;
+    surf->connection = xcb_connect(NULL, &screen_num);
+    if (surf->connection && !xcb_connection_has_error(surf->connection)) {
+        const xcb_setup_t *setup = xcb_get_setup(surf->connection);
+        xcb_screen_iterator_t iter = xcb_setup_roots_iterator(setup);
+        for (int i = 0; i < screen_num; i++) xcb_screen_next(&iter);
+        if (iter.data) {
+            surf->window = iter.data->root;
+            surf->depth = iter.data->root_depth;
+            surf->width = iter.data->width_in_pixels > 0 ? iter.data->width_in_pixels : 1280;
+            surf->height = iter.data->height_in_pixels > 0 ? iter.data->height_in_pixels : 720;
+            surf->is_xcb = true;
+        }
+    }
     *pSurface = surf;
     return VK_SUCCESS;
 }
@@ -3474,6 +3449,21 @@ VkResult vkCreateWin32SurfaceKHR(VkInstance instance, const void *pCreateInfo, v
     if (!surf) return VK_ERROR_OUT_OF_HOST_MEMORY;
     surf->width = 1280;
     surf->height = 720;
+
+    int screen_num = 0;
+    surf->connection = xcb_connect(NULL, &screen_num);
+    if (surf->connection && !xcb_connection_has_error(surf->connection)) {
+        const xcb_setup_t *setup = xcb_get_setup(surf->connection);
+        xcb_screen_iterator_t iter = xcb_setup_roots_iterator(setup);
+        for (int i = 0; i < screen_num; i++) xcb_screen_next(&iter);
+        if (iter.data) {
+            surf->window = iter.data->root;
+            surf->depth = iter.data->root_depth;
+            surf->width = iter.data->width_in_pixels > 0 ? iter.data->width_in_pixels : 1280;
+            surf->height = iter.data->height_in_pixels > 0 ? iter.data->height_in_pixels : 720;
+            surf->is_xcb = true;
+        }
+    }
     *pSurface = surf;
     return VK_SUCCESS;
 }
