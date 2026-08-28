@@ -520,7 +520,7 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, struct VkPhy
     pProperties->driverVersion = 1;
     pProperties->vendorID = 0x13B5; /* ARM Vendor ID */
     pProperties->deviceID = physicalDevice->props.gpu_id ? physicalDevice->props.gpu_id : 0x9000;
-    pProperties->deviceType = 1; /* Integrated GPU */
+    pProperties->deviceType = 2; /* Discrete GPU for DXVK/D3D9 compatibility */
     snprintf(pProperties->deviceName, sizeof(pProperties->deviceName),
              "ARM Mali-G77 MC9 (Valhall v9 - PanVK Open Source Driver)");
 
@@ -964,7 +964,7 @@ void vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, void *
     mp->memoryTypes[1].propertyFlags = 0xF; /* DeviceLocal | HostVisible | HostCoherent | HostCached */
     mp->memoryTypes[1].heapIndex = 0;
     mp->memoryHeapCount = 1;
-    mp->memoryHeaps[0].size = 256ULL * 1024ULL * 1024ULL; /* 256MB Heap for 32-bit Wine chunk compatibility */
+    mp->memoryHeaps[0].size = 4096ULL * 1024ULL * 1024ULL; /* 4GB Unified VRAM Heap */
     mp->memoryHeaps[0].flags = 1; /* Heap flags: DeviceLocal */
 }
 
@@ -987,7 +987,7 @@ void vkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice, struc
             } *mb = (void *)curr;
             memset(mb->heapBudget, 0, sizeof(mb->heapBudget));
             memset(mb->heapUsage, 0, sizeof(mb->heapUsage));
-            mb->heapBudget[0] = 256ULL * 1024ULL * 1024ULL;
+            mb->heapBudget[0] = 4096ULL * 1024ULL * 1024ULL;
             mb->heapUsage[0] = 0;
         }
         curr = curr->pNext;
