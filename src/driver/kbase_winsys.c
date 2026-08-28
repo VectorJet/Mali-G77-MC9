@@ -137,9 +137,9 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
     uint64_t nr_pages = aligned_size / page_size;
 
-    uint64_t mem_flags = 0x000F; /* CPU_RD|CPU_WR|GPU_RD|GPU_WR */
+    uint64_t mem_flags = 0x200F; /* CPU_RD|CPU_WR|GPU_RD|GPU_WR | SAME_VA(0x2000) */
     if (flags & KBASE_BO_PROT_EXEC) {
-        mem_flags = 0x0017; /* CPU_RD|CPU_WR|GPU_RD|GPU_EX */
+        mem_flags = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x2000; /* 0x2017: CPU_RD|CPU_WR|GPU_RD|GPU_EX|SAME_VA */
     }
 
     uint64_t mem[4] = { nr_pages, nr_pages, 0, mem_flags };
@@ -167,7 +167,7 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
 
     bo->dev = dev;
     bo->cpu = cpu_ptr;
-    bo->gpu = mem[1];
+    bo->gpu = (uint64_t)(uintptr_t)cpu_ptr;
     bo->size = aligned_size;
     bo->flags = flags;
 

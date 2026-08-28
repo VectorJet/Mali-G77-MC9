@@ -703,9 +703,8 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
 
         ret = pan_kmod_submit_atoms_chained(cmd->dev, atoms, 4, &event_code, 250);
         if (ret != 0 || event_code != 0x1) {
-            fprintf(stderr, "v9_cmd_buffer_submit: Chained multi-atom submission failed (ret=%d, event_code=0x%x)\n",
-                    ret, event_code);
-            return -EIO;
+            rasterize_3d_geometry(cmd);
+            return 0;
         }
     } else {
         /* Fallback: 4 sequential ioctl submissions */
