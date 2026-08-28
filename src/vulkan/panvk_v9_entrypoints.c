@@ -1785,21 +1785,28 @@ static bool pipeline_dynamic_state(const struct VkPipelineDynamicStateCreateInfo
     return false;
 }
 
+static bool is_valid_spirv_module(const struct VkShaderModule_T *sm) {
+    if (!sm || (uintptr_t)sm < 0x10000) return false;
+    if (sm->code_size < 20 || sm->code_size > 10 * 1024 * 1024) return false;
+    if (!sm->code || (uintptr_t)sm->code < 0x10000) return false;
+    if (sm->code[0] != 0x07230203u) return false;
+    return true;
+}
+
 static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
                                              const struct VkGraphicsPipelineCreateInfo *info) {
-    if (!info->pStages || info->stageCount == 0) return VK_SUCCESS;
+    if (!pipeline || !info || !info->pStages || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
 
     for (uint32_t i = 0; i < info->stageCount; i++) {
         const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
-        if (!stage || !stage->module) continue;
+        if (!stage || (uintptr_t)stage < 0x10000) continue;
 
         pipeline->stage_mask |= stage->stage;
+        const char *name = (stage->pName && (uintptr_t)stage->pName > 0x10000) ? stage->pName : "main";
         if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) {
-            snprintf(pipeline->vertex_entry_point,
-                     sizeof(pipeline->vertex_entry_point), "%s", stage->pName ? stage->pName : "main");
+            snprintf(pipeline->vertex_entry_point, sizeof(pipeline->vertex_entry_point), "%s", name);
         } else if (stage->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
-            snprintf(pipeline->fragment_entry_point,
-                     sizeof(pipeline->fragment_entry_point), "%s", stage->pName ? stage->pName : "main");
+            snprintf(pipeline->fragment_entry_point, sizeof(pipeline->fragment_entry_point), "%s", name);
         }
     }
 
@@ -1808,16 +1815,16 @@ static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
 
 static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
                                          const struct VkGraphicsPipelineCreateInfo *info) {
-    if (!load_compiler()) {
+    if (!pipeline || !info || !info->pStages || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
+    if (!load_compiler() || !compiler_api.compile) {
         return VK_SUCCESS;
     }
 
     char error[512];
     for (uint32_t i = 0; i < info->stageCount; i++) {
         const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
-        if (!stage || !stage->module || !stage->module->code || stage->module->code_size <= 40) {
-            continue;
-        }
+        if (!stage || (uintptr_t)stage < 0x10000) continue;
+        if (!is_valid_spirv_module(stage->module)) continue;
 
         enum panvk_v9_shader_stage compiler_stage;
         struct panvk_v9_compiled_shader *binary;
@@ -1831,13 +1838,14 @@ static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
             continue;
         }
 
+        const char *name = (stage->pName && (uintptr_t)stage->pName > 0x10000) ? stage->pName : "main";
         int ret = compiler_api.compile(stage->module->code, stage->module->code_size,
-                                       compiler_stage, stage->pName ? stage->pName : "main",
+                                       compiler_stage, name,
                                        &pipeline->compiler_layout,
                                        binary,
                                        error, sizeof(error));
         if (ret != 0) {
-            compiler_api.cleanup(binary);
+            if (compiler_api.cleanup) compiler_api.cleanup(binary);
             memset(binary, 0, sizeof(*binary));
         }
     }
