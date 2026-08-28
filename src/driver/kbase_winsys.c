@@ -128,6 +128,8 @@ void kbase_dev_close(struct kbase_dev *dev) {
     free(dev);
 }
 
+static uint64_t next_hint_va = 0x20000000ULL; /* Start at 512MB in low 32-bit space */
+
 struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t flags) {
     if (!dev || size == 0) return NULL;
 
@@ -149,10 +151,21 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     int prot = PROT_READ | PROT_WRITE;
     if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
-    void *cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, mem[1]);
+    /* Hint a 32-bit virtual address (< 4GB) so 32-bit Wine / DXVK can map it without overflow */
+    uint64_t cur_hint = __sync_fetch_and_add(&next_hint_va, aligned_size);
+    if (cur_hint > 0x78000000ULL) {
+        next_hint_va = 0x20000000ULL;
+        cur_hint = 0x20000000ULL;
+    }
+
+    void *cpu_ptr = mmap((void *)(uintptr_t)cur_hint, aligned_size, prot, MAP_SHARED, dev->fd, mem[1]);
     if (cpu_ptr == MAP_FAILED) {
-        perror("kbase_bo_alloc: mmap");
-        return NULL;
+        /* Fallback to unhinted mmap if hint was occupied */
+        cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, mem[1]);
+        if (cpu_ptr == MAP_FAILED) {
+            perror("kbase_bo_alloc: mmap");
+            return NULL;
+        }
     }
 
     struct kbase_bo *bo = calloc(1, sizeof(*bo));
@@ -163,7 +176,7 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
 
     bo->dev = dev;
     bo->cpu = cpu_ptr;
-    bo->gpu = (uint64_t)cpu_ptr;
+    bo->gpu = (uint64_t)(uintptr_t)cpu_ptr;
     bo->size = aligned_size;
     bo->flags = flags;
 
