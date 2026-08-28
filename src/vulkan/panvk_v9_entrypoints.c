@@ -1562,10 +1562,11 @@ VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCr
     if (!pl) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     uint32_t binding_count = 0;
-    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->pSetLayouts) {
+    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->setLayoutCount < 64 && pCreateInfo->pSetLayouts && (uintptr_t)pCreateInfo->pSetLayouts > 0x10000) {
         for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
-            if (pCreateInfo->pSetLayouts[set])
-                binding_count += pCreateInfo->pSetLayouts[set]->binding_count;
+            VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
+            if (set_layout && (uintptr_t)set_layout > 0x10000 && set_layout->binding_count < 256)
+                binding_count += set_layout->binding_count;
         }
     }
     if (binding_count) {
@@ -1580,10 +1581,10 @@ VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCr
     uint32_t ubo_index = 0;
     uint32_t tex_index = 0;
     uint32_t sampler_index = 0;
-    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->pSetLayouts && pl->bindings) {
+    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->setLayoutCount < 64 && pCreateInfo->pSetLayouts && (uintptr_t)pCreateInfo->pSetLayouts > 0x10000 && pl->bindings) {
         for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
             VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
-            if (!set_layout) continue;
+            if (!set_layout || (uintptr_t)set_layout < 0x10000 || set_layout->binding_count > 256 || !set_layout->bindings || (uintptr_t)set_layout->bindings < 0x10000) continue;
             for (uint32_t i = 0; i < set_layout->binding_count; i++) {
                 const struct VkDescriptorSetLayoutBinding *binding = &set_layout->bindings[i];
                 struct panvk_v9_descriptor_binding *out = &pl->bindings[index++];
@@ -1985,13 +1986,22 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
     for (uint32_t i = 0; i < createInfoCount; i++) pPipelines[i] = NULL;
 
     for (uint32_t i = 0; i < createInfoCount; i++) {
+        PANVK_LOG("vkCreateGraphicsPipelines: [%u] start\n", i);
         struct VkPipeline_T *pipe = calloc(1, sizeof(*pipe));
         if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+        PANVK_LOG("vkCreateGraphicsPipelines: [%u] copying layout\n", i);
         pipeline_copy_layout(pipe, pCreateInfos[i].layout);
+
+        PANVK_LOG("vkCreateGraphicsPipelines: [%u] parsing shader stages\n", i);
         pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
+
+        PANVK_LOG("vkCreateGraphicsPipelines: [%u] compiling shaders\n", i);
         pipeline_compile_shaders(pipe, &pCreateInfos[i]);
+
+        PANVK_LOG("vkCreateGraphicsPipelines: [%u] parsing fixed state\n", i);
         pipeline_parse_fixed_state(pipe, &pCreateInfos[i]);
+
         pPipelines[i] = pipe;
         PANVK_LOG("vkCreateGraphicsPipelines OK: [%u/%u] pipe=%p\n", i + 1, createInfoCount, pipe);
     }
