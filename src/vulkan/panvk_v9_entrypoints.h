@@ -24,6 +24,9 @@ extern "C" {
 #define VK_ERROR_INITIALIZATION_FAILED -3
 #define VK_ERROR_OUT_OF_HOST_MEMORY -1
 #define VK_ERROR_OUT_OF_DEVICE_MEMORY -2
+#define VK_ERROR_LAYER_NOT_PRESENT -6
+#define VK_ERROR_EXTENSION_NOT_PRESENT -7
+#define VK_ERROR_FEATURE_NOT_PRESENT -8
 #define VK_ERROR_INVALID_SHADER_NV -1000012000
 #define VK_ERROR_SURFACE_LOST_KHR -1000000000
 #define VK_ERROR_NATIVE_WINDOW_IN_USE_KHR -1000000001
@@ -784,6 +787,7 @@ typedef void (*PFN_vkVoidFunction)(void);
 PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName);
 PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char *pName);
 PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+PFN_vkVoidFunction vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char *pName);
 VkResult vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion);
 
 #ifdef __cplusplus

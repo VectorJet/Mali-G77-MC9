@@ -275,14 +275,16 @@ static bool load_compiler(void) {
 }
 
 /* Loader Negotiation */
+__attribute__((visibility("default")))
 VkResult vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion) {
     if (!pSupportedVersion) return VK_ERROR_INITIALIZATION_FAILED;
-    if (*pSupportedVersion > 6) {
-        *pSupportedVersion = 6;
+    if (*pSupportedVersion > 5) {
+        *pSupportedVersion = 5;
     }
     return VK_SUCCESS;
 }
 
+__attribute__((visibility("default")))
 VkResult vkEnumerateInstanceVersion(uint32_t *pApiVersion) {
     if (!pApiVersion) return VK_ERROR_INITIALIZATION_FAILED;
     *pApiVersion = (1u << 22) | (2u << 12); /* Vulkan 1.2 */
@@ -290,14 +292,21 @@ VkResult vkEnumerateInstanceVersion(uint32_t *pApiVersion) {
 }
 
 /* Extension & Layer Enumeration */
+__attribute__((visibility("default")))
 VkResult vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount, struct VkLayerProperties *pProperties) {
     if (!pPropertyCount) return VK_ERROR_INITIALIZATION_FAILED;
     *pPropertyCount = 0;
     return VK_SUCCESS;
 }
 
+__attribute__((visibility("default")))
 VkResult vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t *pPropertyCount, struct VkExtensionProperties *pProperties) {
     if (!pPropertyCount) return VK_ERROR_INITIALIZATION_FAILED;
+
+    /* If querying a specific layer, return VK_ERROR_LAYER_NOT_PRESENT */
+    if (pLayerName && pLayerName[0] != '\0') {
+        return VK_ERROR_LAYER_NOT_PRESENT;
+    }
 
     static const struct VkExtensionProperties inst_exts[] = {
         { .extensionName = VK_KHR_SURFACE_EXTENSION_NAME, .specVersion = 25 },
@@ -323,11 +332,28 @@ VkResult vkEnumerateInstanceExtensionProperties(const char *pLayerName, uint32_t
     return VK_SUCCESS;
 }
 
+__attribute__((visibility("default")))
 VkResult vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, struct VkExtensionProperties *pProperties) {
     if (!pPropertyCount) return VK_ERROR_INITIALIZATION_FAILED;
 
+    if (pLayerName && pLayerName[0] != '\0') {
+        return VK_ERROR_LAYER_NOT_PRESENT;
+    }
+
     static const struct VkExtensionProperties dev_exts[] = {
         { .extensionName = VK_KHR_SWAPCHAIN_EXTENSION_NAME, .specVersion = 70 },
+        { .extensionName = "VK_KHR_maintenance1", .specVersion = 2 },
+        { .extensionName = "VK_KHR_maintenance2", .specVersion = 1 },
+        { .extensionName = "VK_KHR_maintenance3", .specVersion = 1 },
+        { .extensionName = "VK_KHR_get_memory_requirements2", .specVersion = 1 },
+        { .extensionName = "VK_KHR_dedicated_allocation", .specVersion = 3 },
+        { .extensionName = "VK_KHR_bind_memory2", .specVersion = 1 },
+        { .extensionName = "VK_KHR_sampler_mirror_clamp_to_edge", .specVersion = 3 },
+        { .extensionName = "VK_KHR_shader_draw_parameters", .specVersion = 1 },
+        { .extensionName = "VK_KHR_driver_properties", .specVersion = 1 },
+        { .extensionName = "VK_EXT_custom_border_color", .specVersion = 12 },
+        { .extensionName = "VK_EXT_vertex_attribute_divisor", .specVersion = 3 },
+        { .extensionName = "VK_EXT_transform_feedback", .specVersion = 1 },
     };
     uint32_t num_exts = sizeof(dev_exts) / sizeof(dev_exts[0]);
 
@@ -2005,7 +2031,7 @@ VkResult vkEnumeratePhysicalDeviceGroupsKHR(VkInstance instance, uint32_t *pPhys
 }
 
 /* Vulkan ICD Entry Point Lookup Table */
-PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
+__attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
     if (!pName) return NULL;
 #define MATCH(name) if (strcmp(pName, #name) == 0) return (PFN_vkVoidFunction)name
     MATCH(vk_icdNegotiateLoaderICDInterfaceVersion);
@@ -2128,14 +2154,19 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
     MATCH(vkAcquireNextImageKHR);
     MATCH(vkQueuePresentKHR);
     MATCH(panvk_v9_read_pixel);
+    MATCH(vk_icdGetPhysicalDeviceProcAddr);
 #undef MATCH
     return NULL;
 }
 
-PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char *pName) {
+__attribute__((visibility("default"))) PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char *pName) {
     return vkGetInstanceProcAddr(NULL, pName);
 }
 
 __attribute__((visibility("default"))) PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName) {
+    return vkGetInstanceProcAddr(instance, pName);
+}
+
+__attribute__((visibility("default"))) PFN_vkVoidFunction vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char *pName) {
     return vkGetInstanceProcAddr(instance, pName);
 }
