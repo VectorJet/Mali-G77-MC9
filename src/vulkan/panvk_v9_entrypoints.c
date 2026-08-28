@@ -2690,7 +2690,7 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
         sc->images[i].height = sc->height;
     }
 
-    if (sc->surface && sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
+    if (sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
         uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
         uint32_t values[] = { XCB_BACK_PIXMAP_NONE };
         xcb_change_window_attributes(sc->surface->connection, sc->surface->window, XCB_CW_BACK_PIXMAP, values);
@@ -2701,7 +2701,7 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
         sc->xcb_gc = xcb_generate_id(sc->surface->connection);
         xcb_create_gc(sc->surface->connection, sc->xcb_gc, sc->surface->window, 0, NULL);
         sc->image_data = malloc(sc->width * sc->height * 4);
-    } else if (sc->surface && sc->surface->dpy && sc->surface->window) {
+    } else if (sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->surface->dpy && sc->surface->window) {
         int screen = DefaultScreen(sc->surface->dpy);
         XSetWindowBackgroundPixmap(sc->surface->dpy, sc->surface->window, None);
         sc->gc = XCreateGC(sc->surface->dpy, sc->surface->window, 0, NULL);
@@ -2719,10 +2719,10 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
 void vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, void *pAllocator) {
     if (!swapchain) return;
     if (swapchain->images) free(swapchain->images);
-    if (swapchain->surface && swapchain->surface->is_xcb && swapchain->surface->connection) {
+    if (swapchain->surface && (uintptr_t)swapchain->surface > 0x1000 && swapchain->surface->is_xcb && swapchain->surface->connection) {
         if (swapchain->xcb_pixmap) xcb_free_pixmap(swapchain->surface->connection, swapchain->xcb_pixmap);
         if (swapchain->xcb_gc) xcb_free_gc(swapchain->surface->connection, swapchain->xcb_gc);
-    } else if (swapchain->surface && swapchain->surface->dpy && swapchain->gc) {
+    } else if (swapchain->surface && (uintptr_t)swapchain->surface > 0x1000 && swapchain->surface->dpy && swapchain->gc) {
         XFreeGC(swapchain->surface->dpy, swapchain->gc);
     }
     if (swapchain->image_data) free(swapchain->image_data);
@@ -3415,8 +3415,12 @@ uint32_t vkGetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physical
 }
 
 VkResult vkCreateWaylandSurfaceKHR(VkInstance instance, const void *pCreateInfo, void *pAllocator, void **pSurface) {
-    (void)instance; (void)pCreateInfo; (void)pAllocator;
-    if (pSurface) *pSurface = (void *)0x1;
+    if (!pSurface) return VK_ERROR_INITIALIZATION_FAILED;
+    struct VkSurfaceKHR_T *surf = calloc(1, sizeof(*surf));
+    if (!surf) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    surf->width = 1280;
+    surf->height = 720;
+    *pSurface = surf;
     return VK_SUCCESS;
 }
 
@@ -3426,8 +3430,12 @@ uint32_t vkGetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physi
 }
 
 VkResult vkCreateWin32SurfaceKHR(VkInstance instance, const void *pCreateInfo, void *pAllocator, void **pSurface) {
-    (void)instance; (void)pCreateInfo; (void)pAllocator;
-    if (pSurface) *pSurface = (void *)0x1;
+    if (!pSurface) return VK_ERROR_INITIALIZATION_FAILED;
+    struct VkSurfaceKHR_T *surf = calloc(1, sizeof(*surf));
+    if (!surf) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    surf->width = 1280;
+    surf->height = 720;
+    *pSurface = surf;
     return VK_SUCCESS;
 }
 
