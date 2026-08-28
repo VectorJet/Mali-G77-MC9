@@ -1083,15 +1083,18 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
     mem->bo = pan_kmod_bo_alloc(device->kdev, sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     if (!mem->bo) {
         free(mem);
+        PANVK_LOG("vkAllocateMemory FAILED: sz=%zu\n", sz);
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
     mem->size = sz;
     *pMemory = mem;
+    PANVK_LOG("vkAllocateMemory OK: sz=%zu cpu=%p gpu=0x%llx mem=%p\n", sz, mem->bo->cpu, (unsigned long long)mem->bo->gpu, mem);
     return VK_SUCCESS;
 }
 
 void vkFreeMemory(VkDevice device, VkDeviceMemory memory, void *pAllocator) {
     if (!memory) return;
+    PANVK_LOG("vkFreeMemory: mem=%p\n", memory);
     if (memory->bo) pan_kmod_bo_free(memory->bo);
     free(memory);
 }
@@ -1099,10 +1102,13 @@ void vkFreeMemory(VkDevice device, VkDeviceMemory memory, void *pAllocator) {
 VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkFlags flags, void **ppData) {
     if (!memory || !memory->bo || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
     *ppData = (uint8_t *)memory->bo->cpu + offset;
+    PANVK_LOG("vkMapMemory OK: mem=%p cpu=%p off=%llu sz=%llu -> *ppData=%p\n",
+              memory, memory->bo->cpu, (unsigned long long)offset, (unsigned long long)size, *ppData);
     return VK_SUCCESS;
 }
 
 void vkUnmapMemory(VkDevice device, VkDeviceMemory memory) {
+    (void)device; (void)memory;
 }
 
 VkResult vkCreateBuffer(VkDevice device, const struct VkBufferCreateInfo *pCreateInfo, void *pAllocator, VkBuffer *pBuffer) {
