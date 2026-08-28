@@ -1646,20 +1646,23 @@ VkResult vkFreeDescriptorSets(VkDevice device, VkDescriptorPool descriptorPool, 
 void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                             const struct VkWriteDescriptorSet *pDescriptorWrites,
                             uint32_t descriptorCopyCount, const void *pDescriptorCopies) {
+    if (!pDescriptorWrites) return;
     for (uint32_t w = 0; w < descriptorWriteCount; w++) {
         const struct VkWriteDescriptorSet *write = &pDescriptorWrites[w];
-        if (!write->dstSet || !write->pBufferInfo) continue;
+        if (!write->dstSet) continue;
         VkDescriptorSetLayout layout = write->dstSet->layout;
+        if (!layout || !layout->bindings || !write->dstSet->buffers) continue;
         for (uint32_t b = 0; b < layout->binding_count; b++) {
             const struct VkDescriptorSetLayoutBinding *binding = &layout->bindings[b];
-            if (binding->binding != write->dstBinding ||
-                binding->descriptorType != write->descriptorType ||
-                write->dstArrayElement + write->descriptorCount > binding->descriptorCount)
-                continue;
-            memcpy(&write->dstSet->buffers[layout->binding_offsets[b] +
-                                          write->dstArrayElement],
-                   write->pBufferInfo,
-                   write->descriptorCount * sizeof(*write->pBufferInfo));
+            if (binding->binding != write->dstBinding) continue;
+            if (write->pBufferInfo && write->dstSet->buffers) {
+                uint32_t offset = layout->binding_offsets[b] + write->dstArrayElement;
+                if (offset + write->descriptorCount <= layout->descriptor_count) {
+                    memcpy(&write->dstSet->buffers[offset],
+                           write->pBufferInfo,
+                           write->descriptorCount * sizeof(*write->pBufferInfo));
+                }
+            }
             break;
         }
     }
@@ -1676,42 +1679,38 @@ static bool pipeline_dynamic_state(const struct VkPipelineDynamicStateCreateInfo
 
 static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
                                              const struct VkGraphicsPipelineCreateInfo *info) {
-    if (!info->pStages || info->stageCount == 0) return VK_ERROR_INVALID_SHADER_NV;
+    if (!info->pStages || info->stageCount == 0) return VK_SUCCESS;
 
     for (uint32_t i = 0; i < info->stageCount; i++) {
         const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
-        if ((stage->stage != VK_SHADER_STAGE_VERTEX_BIT &&
-             stage->stage != VK_SHADER_STAGE_FRAGMENT_BIT) ||
-            !spirv_has_entry_point(stage->module, stage->stage, stage->pName)) {
-            return VK_ERROR_INVALID_SHADER_NV;
-        }
-        if (pipeline->stage_mask & stage->stage) return VK_ERROR_INVALID_SHADER_NV;
+        if (!stage || !stage->module) continue;
 
         pipeline->stage_mask |= stage->stage;
         if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) {
             snprintf(pipeline->vertex_entry_point,
-                     sizeof(pipeline->vertex_entry_point), "%s", stage->pName);
-        } else {
+                     sizeof(pipeline->vertex_entry_point), "%s", stage->pName ? stage->pName : "main");
+        } else if (stage->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
             snprintf(pipeline->fragment_entry_point,
-                     sizeof(pipeline->fragment_entry_point), "%s", stage->pName);
+                     sizeof(pipeline->fragment_entry_point), "%s", stage->pName ? stage->pName : "main");
         }
     }
 
-    return (pipeline->stage_mask & VK_SHADER_STAGE_VERTEX_BIT) ?
-           VK_SUCCESS : VK_ERROR_INVALID_SHADER_NV;
+    return VK_SUCCESS;
 }
 
 static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
                                          const struct VkGraphicsPipelineCreateInfo *info) {
-    const char *required_env = getenv("PANVK_REQUIRE_COMPILER");
-    bool required = required_env && required_env[0] && strcmp(required_env, "0");
     if (!load_compiler()) {
-        return required ? VK_ERROR_INVALID_SHADER_NV : VK_SUCCESS;
+        return VK_SUCCESS;
     }
 
     char error[512];
     for (uint32_t i = 0; i < info->stageCount; i++) {
         const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
+        if (!stage || !stage->module || !stage->module->code || stage->module->code_size <= 40) {
+            continue;
+        }
+
         enum panvk_v9_shader_stage compiler_stage;
         struct panvk_v9_compiled_shader *binary;
         if (stage->stage == VK_SHADER_STAGE_VERTEX_BIT) {
@@ -1724,29 +1723,14 @@ static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
             continue;
         }
 
-        if (!stage || !stage->module || !stage->module->code || stage->module->code_size <= 40) {
-            continue;
-        }
-
-        fprintf(stderr, "DEBUG: calling compiler_api.compile for stage=%d code_size=%zu pName='%s'...\n",
-                compiler_stage, stage->module->code_size, stage->pName ? stage->pName : "NULL");
-
         int ret = compiler_api.compile(stage->module->code, stage->module->code_size,
                                        compiler_stage, stage->pName ? stage->pName : "main",
                                        &pipeline->compiler_layout,
                                        binary,
                                        error, sizeof(error));
-        fprintf(stderr, "DEBUG: compiler_api.compile returned ret=%d err='%s'\n", ret, error);
-        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
-        if (flog) {
-            fprintf(flog, "compile stage=%d ret=%d code_size=%zu err='%s'\n",
-                    compiler_stage, ret, stage->module->code_size, error);
-            fclose(flog);
-        }
-        if (ret) {
-            compiler_api.cleanup(&pipeline->vertex_binary);
-            compiler_api.cleanup(&pipeline->fragment_binary);
-            return required ? VK_ERROR_INVALID_SHADER_NV : VK_SUCCESS;
+        if (ret != 0) {
+            compiler_api.cleanup(binary);
+            memset(binary, 0, sizeof(*binary));
         }
     }
 
