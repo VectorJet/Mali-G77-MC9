@@ -100,6 +100,9 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     uint32_t aligned_w = (config->width + 15) & ~15;
     uint32_t aligned_h = (config->height + 15) & ~15;
     size_t color_bytes = aligned_w * aligned_h * 4;
+    if (color_bytes < 1920 * 1080 * 4) {
+        color_bytes = 1920 * 1080 * 4;
+    }
     cmd->color_bo = pan_kmod_bo_alloc(dev, color_bytes, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     if (!cmd->color_bo) {
         PANVK_LOG("v9_cmd_buffer_create: pan_kmod_bo_alloc color_bo failed! size=%zu\n", color_bytes);
@@ -117,7 +120,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
         return NULL;
     }
     memset(cmd->mem_bo->cpu, 0, mem_size);
-    cmd->depth_buf = malloc(config->width * config->height * sizeof(float));
+    cmd->depth_buf = malloc(1920 * 1080 * sizeof(float));
     if (cmd->color_bo && cmd->color_bo->cpu) {
         uint32_t *cptr = (uint32_t *)cmd->color_bo->cpu;
         uint32_t ccount = config->width * config->height;
@@ -257,7 +260,26 @@ void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd) {
 }
 
 void v9_cmd_buffer_set_config(struct v9_cmd_buffer *cmd, const struct v9_render_target_config *config) {
-    if (cmd && config) cmd->config = *config;
+    if (!cmd || !config || !cmd->mem_bo) return;
+    cmd->config = *config;
+    uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
+    uint64_t base_gva = cmd->mem_bo->gpu;
+
+    /* Re-pack Tiler Context */
+    v9_pack_tiler_ctx((uint32_t *)(base_cpu + (cmd->tiler_ctx_gpu - base_gva)),
+                      cmd->polylist_gpu, config->width, config->height, cmd->tiler_heap_desc_gpu);
+
+    /* Re-pack Render Target 0 */
+    v9_pack_rt0((uint32_t *)(base_cpu + (cmd->rt0_gpu - base_gva)),
+                cmd->color_gpu, config->width, config->clear_color);
+
+    /* Re-pack MFBD 1 */
+    v9_pack_mfbd((uint32_t *)(base_cpu + 0x6000), config->width, config->height,
+                 cmd->dcd_gpu, cmd->tiler_ctx_gpu, cmd->sampleloc_gpu, true);
+
+    /* Re-pack MFBD 2 */
+    v9_pack_mfbd2((uint32_t *)(base_cpu + (cmd->mfbd2_gpu - base_gva)),
+                  config->width, config->height, cmd->dcd2_gpu, cmd->tiler_ctx_gpu, cmd->sampleloc_gpu);
 }
 
 int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd) {

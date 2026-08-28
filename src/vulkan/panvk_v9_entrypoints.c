@@ -94,6 +94,9 @@ struct VkDevice_T {
     struct VkDeviceMemory_T *memories;
     pthread_mutex_t mem_mutex;
     void *last_rendered_color;
+    uint32_t last_rendered_w;
+    uint32_t last_rendered_h;
+    struct v9_cmd_buffer *last_main_cmd;
 };
 
 static struct VkDevice_T *g_global_device = NULL;
@@ -2585,12 +2588,21 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
                         queue->last_v9_cmd = cmd->v9_cmd;
                         v9_cmd_buffer_submit(cmd->v9_cmd);
                         void *color = v9_cmd_buffer_get_color_cpu(cmd->v9_cmd);
+                        uint32_t w = v9_cmd_buffer_get_width(cmd->v9_cmd);
+                        uint32_t h = v9_cmd_buffer_get_height(cmd->v9_cmd);
                         if (color && queue->device) {
-                            queue->device->last_rendered_color = color;
+                            if (w * h >= queue->device->last_rendered_w * queue->device->last_rendered_h) {
+                                queue->device->last_rendered_color = color;
+                                queue->device->last_rendered_w = w;
+                                queue->device->last_rendered_h = h;
+                                queue->device->last_main_cmd = cmd->v9_cmd;
+                            }
                         }
                         if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo) {
                             size_t sz = (size_t)cmd->target_swapchain_image->width * cmd->target_swapchain_image->height * 4;
-                            memcpy(cmd->target_swapchain_image->bo->cpu, color, sz);
+                            size_t src_sz = v9_cmd_buffer_get_color_size(cmd->v9_cmd);
+                            size_t copy_sz = src_sz < sz ? src_sz : sz;
+                            memcpy(cmd->target_swapchain_image->bo->cpu, color, copy_sz);
                         }
                     }
                 }
@@ -2945,7 +2957,12 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
 
     VkSwapchainKHR sc = pPresentInfo->pSwapchains[0];
     uint32_t img_idx = pPresentInfo->pImageIndices ? pPresentInfo->pImageIndices[0] : 0;
-    struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
+    struct v9_cmd_buffer *last_cmd = NULL;
+    if (queue && queue->device && queue->device->last_main_cmd) {
+        last_cmd = queue->device->last_main_cmd;
+    } else if (queue && queue->last_v9_cmd) {
+        last_cmd = queue->last_v9_cmd;
+    }
     void *color_cpu = last_cmd ? v9_cmd_buffer_get_color_cpu(last_cmd) : NULL;
 
     if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
@@ -3012,6 +3029,11 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
                 XFlush(sc->surface->dpy);
             }
         }
+    }
+    if (queue && queue->device) {
+        queue->device->last_main_cmd = NULL;
+        queue->device->last_rendered_w = 0;
+        queue->device->last_rendered_h = 0;
     }
     return VK_SUCCESS;
 }
