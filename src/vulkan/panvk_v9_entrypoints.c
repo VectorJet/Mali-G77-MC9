@@ -1778,7 +1778,7 @@ void vkUpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
 
 static bool pipeline_dynamic_state(const struct VkPipelineDynamicStateCreateInfo *dynamic,
                                    uint32_t state) {
-    if (!dynamic || !dynamic->pDynamicStates) return false;
+    if (!dynamic || (uintptr_t)dynamic < 0x10000 || !dynamic->pDynamicStates || (uintptr_t)dynamic->pDynamicStates < 0x10000 || dynamic->dynamicStateCount > 100) return false;
     for (uint32_t i = 0; i < dynamic->dynamicStateCount; i++) {
         if (dynamic->pDynamicStates[i] == state) return true;
     }
@@ -1795,7 +1795,7 @@ static bool is_valid_spirv_module(const struct VkShaderModule_T *sm) {
 
 static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
                                              const struct VkGraphicsPipelineCreateInfo *info) {
-    if (!pipeline || !info || !info->pStages || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
+    if (!pipeline || !info || !info->pStages || (uintptr_t)info->pStages < 0x10000 || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
 
     for (uint32_t i = 0; i < info->stageCount; i++) {
         const struct VkPipelineShaderStageCreateInfo *stage = &info->pStages[i];
@@ -1815,7 +1815,7 @@ static VkResult pipeline_parse_shader_stages(struct VkPipeline_T *pipeline,
 
 static VkResult pipeline_compile_shaders(struct VkPipeline_T *pipeline,
                                          const struct VkGraphicsPipelineCreateInfo *info) {
-    if (!pipeline || !info || !info->pStages || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
+    if (!pipeline || !info || !info->pStages || (uintptr_t)info->pStages < 0x10000 || info->stageCount == 0 || info->stageCount > 16) return VK_SUCCESS;
     if (!load_compiler() || !compiler_api.compile) {
         return VK_SUCCESS;
     }
@@ -1866,8 +1866,8 @@ static void pipeline_cleanup(struct VkPipeline_T *pipeline) {
 
 static VkResult pipeline_copy_layout(struct VkPipeline_T *pipeline,
                                      VkPipelineLayout layout) {
-    if (!pipeline || !layout) return VK_SUCCESS;
-    if (layout->compiler_layout.binding_count > 0 && layout->compiler_layout.binding_count < 256 && layout->bindings) {
+    if (!pipeline || !layout || (uintptr_t)layout < 0x10000) return VK_SUCCESS;
+    if (layout->compiler_layout.binding_count > 0 && layout->compiler_layout.binding_count < 256 && layout->bindings && (uintptr_t)layout->bindings > 0x10000) {
         size_t size = layout->compiler_layout.binding_count * sizeof(*pipeline->bindings);
         pipeline->bindings = calloc(1, size);
         if (pipeline->bindings) {
@@ -1893,7 +1893,7 @@ static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
     pipeline->color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
-    if (info->pVertexInputState) {
+    if (info->pVertexInputState && (uintptr_t)info->pVertexInputState > 0x10000) {
         pipeline->vertex_binding_count =
             info->pVertexInputState->vertexBindingDescriptionCount < 16 ?
             info->pVertexInputState->vertexBindingDescriptionCount : 16;
@@ -1901,51 +1901,55 @@ static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
             info->pVertexInputState->vertexAttributeDescriptionCount < 16 ?
             info->pVertexInputState->vertexAttributeDescriptionCount : 16;
         if (pipeline->vertex_binding_count &&
-            info->pVertexInputState->pVertexBindingDescriptions) {
+            info->pVertexInputState->pVertexBindingDescriptions &&
+            (uintptr_t)info->pVertexInputState->pVertexBindingDescriptions > 0x10000) {
             memcpy(pipeline->vertex_bindings,
                    info->pVertexInputState->pVertexBindingDescriptions,
                    pipeline->vertex_binding_count * sizeof(pipeline->vertex_bindings[0]));
         }
         if (pipeline->vertex_attribute_count &&
-            info->pVertexInputState->pVertexAttributeDescriptions) {
+            info->pVertexInputState->pVertexAttributeDescriptions &&
+            (uintptr_t)info->pVertexInputState->pVertexAttributeDescriptions > 0x10000) {
             memcpy(pipeline->vertex_attributes,
                    info->pVertexInputState->pVertexAttributeDescriptions,
                    pipeline->vertex_attribute_count * sizeof(pipeline->vertex_attributes[0]));
         }
     }
 
-    if (info->pInputAssemblyState) {
+    if (info->pInputAssemblyState && (uintptr_t)info->pInputAssemblyState > 0x10000) {
         pipeline->topology = info->pInputAssemblyState->topology;
         pipeline->primitive_restart = info->pInputAssemblyState->primitiveRestartEnable != 0;
     }
-    if (info->pViewportState) {
-        if (info->pViewportState->viewportCount && info->pViewportState->pViewports)
+    if (info->pViewportState && (uintptr_t)info->pViewportState > 0x10000) {
+        if (info->pViewportState->viewportCount && info->pViewportState->pViewports && (uintptr_t)info->pViewportState->pViewports > 0x10000)
             pipeline->viewport = info->pViewportState->pViewports[0];
-        if (info->pViewportState->scissorCount && info->pViewportState->pScissors)
+        if (info->pViewportState->scissorCount && info->pViewportState->pScissors && (uintptr_t)info->pViewportState->pScissors > 0x10000)
             pipeline->scissor = info->pViewportState->pScissors[0];
     }
-    if (info->pDynamicState) {
+    if (info->pDynamicState && (uintptr_t)info->pDynamicState > 0x10000) {
         pipeline->dynamic_viewport = pipeline_dynamic_state(info->pDynamicState,
                                                             VK_DYNAMIC_STATE_VIEWPORT);
         pipeline->dynamic_scissor = pipeline_dynamic_state(info->pDynamicState,
                                                            VK_DYNAMIC_STATE_SCISSOR);
     }
-    if (info->pRasterizationState) {
+    if (info->pRasterizationState && (uintptr_t)info->pRasterizationState > 0x10000) {
         pipeline->rasterizer_discard = info->pRasterizationState->rasterizerDiscardEnable != 0;
         pipeline->polygon_mode = info->pRasterizationState->polygonMode;
         pipeline->cull_mode = info->pRasterizationState->cullMode;
         pipeline->front_face = info->pRasterizationState->frontFace;
         pipeline->line_width = info->pRasterizationState->lineWidth;
     }
-    if (info->pMultisampleState)
+    if (info->pMultisampleState && (uintptr_t)info->pMultisampleState > 0x10000)
         pipeline->rasterization_samples = info->pMultisampleState->rasterizationSamples;
-    if (info->pDepthStencilState) {
+    if (info->pDepthStencilState && (uintptr_t)info->pDepthStencilState > 0x10000) {
         pipeline->depth_test = info->pDepthStencilState->depthTestEnable != 0;
         pipeline->depth_write = info->pDepthStencilState->depthWriteEnable != 0;
         pipeline->depth_compare_op = info->pDepthStencilState->depthCompareOp;
     }
-    if (info->pColorBlendState && info->pColorBlendState->attachmentCount &&
-        info->pColorBlendState->pAttachments) {
+    if (info->pColorBlendState && (uintptr_t)info->pColorBlendState > 0x10000 &&
+        info->pColorBlendState->attachmentCount &&
+        info->pColorBlendState->pAttachments &&
+        (uintptr_t)info->pColorBlendState->pAttachments > 0x10000) {
         pipeline->blend_enable = info->pColorBlendState->pAttachments[0].blendEnable != 0;
         pipeline->color_write_mask = info->pColorBlendState->pAttachments[0].colorWriteMask;
     }
@@ -1968,7 +1972,7 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         pipeline_compile_shaders(pipe, &pCreateInfos[i]);
         pipeline_parse_fixed_state(pipe, &pCreateInfos[i]);
         pPipelines[i] = pipe;
-        PANVK_LOG("vkCreateGraphicsPipelines OK: [%u] pipe=%p\n", i, pipe);
+        PANVK_LOG("vkCreateGraphicsPipelines OK: [%u/%u] pipe=%p\n", i + 1, createInfoCount, pipe);
     }
     return VK_SUCCESS;
 }
