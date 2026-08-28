@@ -2107,6 +2107,10 @@ VkResult vkAllocateCommandBuffers(VkDevice device, const struct VkCommandBufferA
         if (!cb) return VK_ERROR_OUT_OF_HOST_MEMORY;
         set_loader_magic(cb);
         cb->device = device;
+        struct v9_render_target_config default_cfg = { 1280, 720, 0xFF333333 };
+        if (device && device->kdev) {
+            cb->v9_cmd = v9_cmd_buffer_create(device->kdev, &default_cfg);
+        }
         pCommandBuffers[i] = cb;
     }
     return VK_SUCCESS;
@@ -2131,6 +2135,13 @@ VkResult vkBeginCommandBuffer(VkCommandBuffer commandBuffer, const struct VkComm
     commandBuffer->viewport_set = false;
     commandBuffer->scissor_set = false;
     memset(commandBuffer->descriptor_sets, 0, sizeof(commandBuffer->descriptor_sets));
+    if (!commandBuffer->v9_cmd && commandBuffer->device && commandBuffer->device->kdev) {
+        struct v9_render_target_config default_cfg = { 1280, 720, 0xFF333333 };
+        commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &default_cfg);
+    }
+    if (commandBuffer->v9_cmd) {
+        v9_cmd_buffer_begin(commandBuffer->v9_cmd);
+    }
     return VK_SUCCESS;
 }
 
@@ -2418,13 +2429,13 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         }
     }
 
-    if (commandBuffer->v9_cmd) {
-        v9_cmd_buffer_destroy(commandBuffer->v9_cmd);
+    if (!commandBuffer->v9_cmd) {
+        if (commandBuffer->device && commandBuffer->device->kdev) {
+            commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &config);
+        }
     }
-    if (commandBuffer->device && commandBuffer->device->kdev) {
-        commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &config);
-    }
     if (commandBuffer->v9_cmd) {
+        v9_cmd_buffer_set_config(commandBuffer->v9_cmd, &config);
         v9_cmd_buffer_begin(commandBuffer->v9_cmd);
     }
 }
