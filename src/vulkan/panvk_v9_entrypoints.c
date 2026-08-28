@@ -19,7 +19,9 @@
 #define PANVK_LOG(...) do { if (getenv("PANVK_DEBUG")) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
 
 static inline void panvk_trace(const char *func, const char *extra) {
-    FILE *f = fopen("/sdcard/Download/panvk_trace.log", "a");
+    FILE *f = fopen("/tmp/panvk_trace.log", "a");
+    if (!f) f = fopen("/data/user/0/com.winlator.mali/files/imagefs/tmp/panvk_trace.log", "a");
+    if (!f) f = fopen("/sdcard/Download/panvk_trace.log", "a");
     if (f) {
         if (extra) fprintf(f, "%s: %s\n", func, extra);
         else fprintf(f, "%s\n", func);
@@ -2101,7 +2103,8 @@ void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, uint32_t srcStageMask,
 }
 
 static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
-    struct v9_ubo_binding ubos[8];
+    if (!commandBuffer || !commandBuffer->v9_cmd) return;
+    struct v9_ubo_binding ubos[8] = {0};
     uint32_t ubo_count = 0;
     VkPipeline pipeline = commandBuffer->graphics_pipeline;
     if (!pipeline) {
@@ -2109,20 +2112,21 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
         return;
     }
 
-    for (uint32_t i = 0; i < pipeline->compiler_layout.binding_count; i++) {
+    for (uint32_t i = 0; i < pipeline->compiler_layout.binding_count && ubo_count < 8; i++) {
         const struct panvk_v9_descriptor_binding *binding =
             &pipeline->compiler_layout.bindings[i];
-        if ((binding->descriptor_type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
-             binding->descriptor_type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) ||
-            binding->set >= 8 || !commandBuffer->descriptor_sets[binding->set])
+        if (binding->set >= 8 || !commandBuffer->descriptor_sets[binding->set])
             continue;
 
         VkDescriptorSet set = commandBuffer->descriptor_sets[binding->set];
+        if (!set->layout || !set->buffers) continue;
+
         for (uint32_t b = 0; b < set->layout->binding_count; b++) {
             if (set->layout->bindings[b].binding != binding->binding) continue;
             for (uint32_t elem = 0; elem < binding->array_size && ubo_count < 8; elem++) {
-                const struct VkDescriptorBufferInfo *info =
-                    &set->buffers[set->layout->binding_offsets[b] + elem];
+                uint32_t offset_idx = set->layout->binding_offsets[b] + elem;
+                if (offset_idx >= set->layout->descriptor_count) break;
+                const struct VkDescriptorBufferInfo *info = &set->buffers[offset_idx];
                 if (!info->buffer || !info->buffer->bo || info->offset >= info->buffer->size)
                     continue;
                 VkDeviceSize available = info->buffer->size - info->offset;
@@ -2135,19 +2139,6 @@ static void command_buffer_apply_ubos(VkCommandBuffer commandBuffer) {
                 };
             }
             break;
-        }
-    }
-    PANVK_LOG("DEBUG: apply_ubos: count=%u addr0=0x%llx size0=%u\n",
-              ubo_count, (unsigned long long)(ubo_count ? ubos[0].address : 0),
-              ubo_count ? ubos[0].size : 0);
-    if (ubo_count && ubos[0].address) {
-        VkDescriptorSet set = commandBuffer->descriptor_sets[0];
-        if (set && set->buffers && set->buffers[0].buffer && set->buffers[0].buffer->bo) {
-            float *f = (float *)set->buffers[0].buffer->bo->cpu;
-            PANVK_LOG("DEBUG: UBO[0] floats[0..7]: %f %f %f %f %f %f %f %f\n",
-                      f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
-            PANVK_LOG("DEBUG: UBO[0] floats[16..23] (MVP matrix): %f %f %f %f %f %f %f %f\n",
-                      f[16], f[17], f[18], f[19], f[20], f[21], f[22], f[23]);
         }
     }
     v9_cmd_buffer_set_ubos(commandBuffer->v9_cmd, ubos, ubo_count);
@@ -2166,6 +2157,7 @@ static uint32_t vk_format_to_pan_v9_attr_format(uint32_t vk_fmt) {
 }
 
 static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
+    if (!commandBuffer || !commandBuffer->v9_cmd) return;
     struct v9_attribute_binding attrs[8] = {0};
     uint32_t attr_count = 0;
     VkPipeline pipeline = commandBuffer->graphics_pipeline;
@@ -2197,31 +2189,6 @@ static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
         };
         if (attribute->location + 1 > attr_count)
             attr_count = attribute->location + 1;
-    }
-    if (attr_count == 0 && commandBuffer->v9_cmd) {
-        attrs[0] = (struct v9_attribute_binding) {
-            .format = vk_format_to_pan_v9_attr_format(VK_FORMAT_R32G32B32_SFLOAT),
-            .offset = 0,
-            .stride = 16,
-            .input_rate = 0,
-            .buffer_address = v9_cmd_buffer_get_pos_gpu(commandBuffer->v9_cmd),
-            .buffer_size = 4096,
-        };
-        attr_count = 1;
-    }
-    PANVK_LOG("DEBUG: apply_attrs: count=%u fmt0=0x%x stride0=%u addr0=0x%llx size0=%u\n",
-              attr_count, attrs[0].format, attrs[0].stride,
-              (unsigned long long)attrs[0].buffer_address, attrs[0].buffer_size);
-    for (uint32_t a = 0; a < attr_count; a++) {
-        PANVK_LOG("  attr[%u]: fmt=0x%x off=%u str=%u addr=0x%llx sz=%u\n",
-                  a, attrs[a].format, attrs[a].offset, attrs[a].stride,
-                  (unsigned long long)attrs[a].buffer_address, attrs[a].buffer_size);
-    }
-    if (commandBuffer->vertex_bindings[0].buffer && commandBuffer->vertex_bindings[0].buffer->bo) {
-        float *vbuf = (float *)((uint8_t *)commandBuffer->vertex_bindings[0].buffer->bo->cpu +
-                                commandBuffer->vertex_bindings[0].buffer->memory_offset);
-        PANVK_LOG("DEBUG: VertexBuf floats[0..8]: %f %f %f %f %f %f %f %f %f\n",
-                  vbuf[0], vbuf[1], vbuf[2], vbuf[3], vbuf[4], vbuf[5], vbuf[6], vbuf[7], vbuf[8]);
     }
     v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
 }
@@ -2270,7 +2237,6 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         clear_color = (a << 24) | (b << 16) | (g << 8) | r;
     }
 
-    /* Use framebuffer dimensions first, then renderArea, then default */
     uint32_t fb_width = 0, fb_height = 0;
     VkFramebuffer fb = pRenderPassBegin->framebuffer;
     if (fb && fb->width > 0) {
@@ -2284,8 +2250,6 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         fb_height = 720;
     }
 
-    PANVK_LOG("vkCmdBeginRenderPass: fb=%ux%u clear=0x%08x\n", fb_width, fb_height, clear_color);
-
     struct v9_render_target_config config = {
         .width = fb_width,
         .height = fb_height,
@@ -2295,7 +2259,9 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
     if (commandBuffer->v9_cmd) {
         v9_cmd_buffer_destroy(commandBuffer->v9_cmd);
     }
-    commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &config);
+    if (commandBuffer->device && commandBuffer->device->kdev) {
+        commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &config);
+    }
     if (commandBuffer->v9_cmd) {
         v9_cmd_buffer_begin(commandBuffer->v9_cmd);
     }
@@ -2383,33 +2349,19 @@ VkResult vkEndCommandBuffer(VkCommandBuffer commandBuffer) {
 }
 
 VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmitInfo *pSubmits, void *fence) {
-    if (!queue || !pSubmits) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!queue) return VK_ERROR_INITIALIZATION_FAILED;
 
-    for (uint32_t s = 0; s < submitCount; s++) {
-        for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
-            VkCommandBuffer cmd = pSubmits[s].pCommandBuffers[cb];
-            if (cmd && cmd->v9_cmd) {
-                command_buffer_apply_ubos(cmd);
-                if (cmd->descriptor_sets[0] && cmd->descriptor_sets[0]->buffers &&
-                    cmd->descriptor_sets[0]->buffers[0].buffer &&
-                    cmd->descriptor_sets[0]->buffers[0].buffer->bo &&
-                    cmd->vertex_bindings[0].buffer &&
-                    cmd->vertex_bindings[0].buffer->bo) {
-                    float *ubo = (float *)cmd->descriptor_sets[0]->buffers[0].buffer->bo->cpu;
-                    float *mvp = ubo + 16; /* modelviewprojectionMatrix at offset 64 */
-                    uint8_t *vbuf = (uint8_t *)cmd->vertex_bindings[0].buffer->bo->cpu +
-                                    cmd->vertex_bindings[0].buffer->memory_offset;
-                    float *vpos = (float *)vbuf;
-                    float *vnorm = (float *)(vbuf + 432);
-                    float *vcol = (float *)(vbuf + 864);
-                    v9_cmd_buffer_update_transformed_vertices(cmd->v9_cmd, mvp, vpos, vnorm, vcol, 36);
+    if (pSubmits) {
+        for (uint32_t s = 0; s < submitCount; s++) {
+            for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
+                VkCommandBuffer cmd = pSubmits[s].pCommandBuffers[cb];
+                if (cmd && cmd->v9_cmd) {
+                    if (queue->last_v9_cmd != cmd->v9_cmd) {
+                        v9_cmd_buffer_destroy(queue->last_v9_cmd);
+                        queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
+                    }
+                    v9_cmd_buffer_submit(cmd->v9_cmd);
                 }
-                if (queue->last_v9_cmd != cmd->v9_cmd) {
-                    v9_cmd_buffer_destroy(queue->last_v9_cmd);
-                    queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
-                }
-                int ret = v9_cmd_buffer_submit(cmd->v9_cmd);
-                if (ret != 0) return VK_ERROR_INITIALIZATION_FAILED;
             }
         }
     }
