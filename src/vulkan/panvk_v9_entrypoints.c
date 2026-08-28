@@ -964,7 +964,7 @@ void vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, void *
     mp->memoryTypes[1].propertyFlags = 0xF; /* DeviceLocal | HostVisible | HostCoherent | HostCached */
     mp->memoryTypes[1].heapIndex = 0;
     mp->memoryHeapCount = 1;
-    mp->memoryHeaps[0].size = 256ULL * 1024ULL * 1024ULL; /* 256MB Heap for 32-bit Wine chunk compatibility */
+    mp->memoryHeaps[0].size = 2048ULL * 1024ULL * 1024ULL; /* 2GB Unified Heap */
     mp->memoryHeaps[0].flags = 1; /* Heap flags: DeviceLocal */
 }
 

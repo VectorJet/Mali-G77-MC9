@@ -128,6 +128,8 @@ void kbase_dev_close(struct kbase_dev *dev) {
     free(dev);
 }
 
+static uint64_t g_kbase_hint_va = 0x20000000ULL;
+
 struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t flags) {
     if (!dev || size == 0) return NULL;
 
@@ -148,7 +150,18 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     int prot = PROT_READ | PROT_WRITE;
     if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
-    void *cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    /* Hint at 32-bit address space (< 2GB) so 32-bit Windows apps/DXVK get valid 32-bit pointers.
+     * Note: We NEVER pass MAP_FIXED to avoid overwriting existing mappings. */
+    uint64_t hint = __sync_fetch_and_add(&g_kbase_hint_va, aligned_size);
+    if (hint > 0x70000000ULL) {
+        g_kbase_hint_va = 0x20000000ULL;
+        hint = 0x20000000ULL;
+    }
+
+    void *cpu_ptr = mmap((void *)(uintptr_t)hint, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    if (cpu_ptr == MAP_FAILED) {
+        cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    }
     if (cpu_ptr == MAP_FAILED) {
         uint64_t free_va = mem[1];
         ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
