@@ -612,16 +612,16 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, struct VkPhy
     l->maxFramebufferWidth = 16384;
     l->maxFramebufferHeight = 16384;
     l->maxFramebufferLayers = 2048;
-    l->framebufferColorSampleCounts = 1 | 4;
-    l->framebufferDepthSampleCounts = 1 | 4;
-    l->framebufferStencilSampleCounts = 1 | 4;
-    l->framebufferNoAttachmentsSampleCounts = 1 | 4;
+    l->framebufferColorSampleCounts = 0x7F;
+    l->framebufferDepthSampleCounts = 0x7F;
+    l->framebufferStencilSampleCounts = 0x7F;
+    l->framebufferNoAttachmentsSampleCounts = 0x7F;
     l->maxColorAttachments = 8;
-    l->sampledImageColorSampleCounts = 1 | 4;
-    l->sampledImageIntegerSampleCounts = 1 | 4;
-    l->sampledImageDepthSampleCounts = 1 | 4;
-    l->sampledImageStencilSampleCounts = 1 | 4;
-    l->storageImageSampleCounts = 1;
+    l->sampledImageColorSampleCounts = 0x7F;
+    l->sampledImageIntegerSampleCounts = 0x7F;
+    l->sampledImageDepthSampleCounts = 0x7F;
+    l->sampledImageStencilSampleCounts = 0x7F;
+    l->storageImageSampleCounts = 0x7F;
     l->maxSampleMaskWords = 1;
     l->timestampComputeAndGraphics = 1;
     l->timestampPeriod = 1.0f;
@@ -1055,7 +1055,7 @@ VkResult vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice physicalDevic
     ifp->maxExtent.depth = 2048;
     ifp->maxMipLevels = 16;
     ifp->maxArrayLayers = 2048;
-    ifp->sampleCounts = 1 | 4;
+    ifp->sampleCounts = 0x7F; /* 1 | 2 | 4 | 8 | 16 | 32 | 64 */
     ifp->maxResourceSize = 1024ULL * 1024ULL * 1024ULL; /* 1GB */
     return VK_SUCCESS;
 }
