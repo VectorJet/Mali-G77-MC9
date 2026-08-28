@@ -148,7 +148,6 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     }
 
     int prot = PROT_READ | PROT_WRITE;
-    if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
     void *hint = (void *)(uintptr_t)next_hint_va;
     next_hint_va += aligned_size;
