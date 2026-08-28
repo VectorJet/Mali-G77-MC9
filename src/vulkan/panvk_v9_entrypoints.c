@@ -3007,24 +3007,36 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
 
     VkSwapchainKHR sc = pPresentInfo->pSwapchains[0];
     uint32_t img_idx = pPresentInfo->pImageIndices ? pPresentInfo->pImageIndices[0] : 0;
+    void *color_cpu = NULL;
+    uint32_t src_w = 0;
+    uint32_t src_h = 0;
+    size_t color_bytes = 0;
     struct v9_cmd_buffer *last_cmd = NULL;
     if (queue && queue->device && queue->device->last_main_cmd) {
         last_cmd = queue->device->last_main_cmd;
     } else if (queue && queue->last_v9_cmd) {
         last_cmd = queue->last_v9_cmd;
     }
-    void *color_cpu = last_cmd ? v9_cmd_buffer_get_color_cpu(last_cmd) : NULL;
 
-    if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
-        color_cpu = queue->device->last_rendered_color;
-    }
-    if (!color_cpu && sc && img_idx < sc->image_count && sc->images[img_idx].bo) {
+    if (sc && img_idx < sc->image_count && sc->images[img_idx].bo && sc->images[img_idx].bo->cpu) {
         color_cpu = sc->images[img_idx].bo->cpu;
+        src_w = sc->width;
+        src_h = sc->height;
+        color_bytes = (size_t)sc->width * sc->height * 4;
+    } else {
+        if (last_cmd) {
+            color_cpu = v9_cmd_buffer_get_color_cpu(last_cmd);
+            src_w = v9_cmd_buffer_get_width(last_cmd);
+            src_h = v9_cmd_buffer_get_height(last_cmd);
+            color_bytes = v9_cmd_buffer_get_color_size(last_cmd);
+        }
+        if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
+            color_cpu = queue->device->last_rendered_color;
+            src_w = queue->device->last_rendered_w ? queue->device->last_rendered_w : (sc ? sc->width : 1280);
+            src_h = queue->device->last_rendered_h ? queue->device->last_rendered_h : (sc ? sc->height : 720);
+            color_bytes = (size_t)src_w * src_h * 4;
+        }
     }
-
-    uint32_t src_w = last_cmd ? v9_cmd_buffer_get_width(last_cmd) : (sc ? sc->width : 0);
-    uint32_t src_h = last_cmd ? v9_cmd_buffer_get_height(last_cmd) : (sc ? sc->height : 0);
-    size_t color_bytes = last_cmd ? v9_cmd_buffer_get_color_size(last_cmd) : 0;
 
     uint32_t sample0 = 0, sample_mid = 0;
     if (color_cpu) {
