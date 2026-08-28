@@ -612,16 +612,16 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, struct VkPhy
     l->maxFramebufferWidth = 16384;
     l->maxFramebufferHeight = 16384;
     l->maxFramebufferLayers = 2048;
-    l->framebufferColorSampleCounts = 0x7F;
-    l->framebufferDepthSampleCounts = 0x7F;
-    l->framebufferStencilSampleCounts = 0x7F;
-    l->framebufferNoAttachmentsSampleCounts = 0x7F;
+    l->framebufferColorSampleCounts = 1 | 4;
+    l->framebufferDepthSampleCounts = 1 | 4;
+    l->framebufferStencilSampleCounts = 1 | 4;
+    l->framebufferNoAttachmentsSampleCounts = 1 | 4;
     l->maxColorAttachments = 8;
-    l->sampledImageColorSampleCounts = 0x7F;
-    l->sampledImageIntegerSampleCounts = 0x7F;
-    l->sampledImageDepthSampleCounts = 0x7F;
-    l->sampledImageStencilSampleCounts = 0x7F;
-    l->storageImageSampleCounts = 0x7F;
+    l->sampledImageColorSampleCounts = 1 | 4;
+    l->sampledImageIntegerSampleCounts = 1 | 4;
+    l->sampledImageDepthSampleCounts = 1 | 4;
+    l->sampledImageStencilSampleCounts = 1 | 4;
+    l->storageImageSampleCounts = 1;
     l->maxSampleMaskWords = 1;
     l->timestampComputeAndGraphics = 1;
     l->timestampPeriod = 1.0f;
@@ -964,7 +964,7 @@ void vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, void *
     mp->memoryTypes[1].propertyFlags = 0xF; /* DeviceLocal | HostVisible | HostCoherent | HostCached */
     mp->memoryTypes[1].heapIndex = 0;
     mp->memoryHeapCount = 1;
-    mp->memoryHeaps[0].size = 2048ULL * 1024ULL * 1024ULL; /* 2GB Unified Heap */
+    mp->memoryHeaps[0].size = 256ULL * 1024ULL * 1024ULL; /* 256MB Heap for 32-bit Wine chunk compatibility */
     mp->memoryHeaps[0].flags = 1; /* Heap flags: DeviceLocal */
 }
 
@@ -1055,7 +1055,7 @@ VkResult vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice physicalDevic
     ifp->maxExtent.depth = 2048;
     ifp->maxMipLevels = 16;
     ifp->maxArrayLayers = 2048;
-    ifp->sampleCounts = 0x7F; /* 1 | 2 | 4 | 8 | 16 | 32 | 64 */
+    ifp->sampleCounts = 1 | 4;
     ifp->maxResourceSize = 1024ULL * 1024ULL * 1024ULL; /* 1GB */
     return VK_SUCCESS;
 }
@@ -1144,10 +1144,12 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
         if (!device->kdev) device->kdev = pan_kmod_dev_create(NULL);
         if (device->kdev) mem->bo = pan_kmod_bo_alloc(device->kdev, aligned_sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     }
+
     if (!mem->bo) {
         free(mem);
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
+
     mem->size = aligned_sz;
 
     /* Add to device memory list */
@@ -1182,12 +1184,10 @@ void vkFreeMemory(VkDevice device, VkDeviceMemory memory, void *pAllocator) {
 }
 
 VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkFlags flags, void **ppData) {
-    if (!memory || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
-    void *base = memory->bo ? memory->bo->cpu : NULL;
-    if (!base) return VK_ERROR_INITIALIZATION_FAILED;
-    *ppData = (uint8_t *)base + offset;
-    PANVK_LOG("vkMapMemory OK: mem=%p base=%p off=%llu sz=%llu -> *ppData=%p\n",
-              memory, base, (unsigned long long)offset, (unsigned long long)size, *ppData);
+    if (!memory || !ppData || !memory->bo || !memory->bo->cpu) return VK_ERROR_INITIALIZATION_FAILED;
+    *ppData = (uint8_t *)memory->bo->cpu + offset;
+    PANVK_LOG("vkMapMemory OK: mem=%p cpu=%p off=%llu sz=%llu -> *ppData=%p\n",
+              memory, memory->bo->cpu, (unsigned long long)offset, (unsigned long long)size, *ppData);
     return VK_SUCCESS;
 }
 
@@ -2698,20 +2698,23 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
 
     sc->device = device;
     sc->surface = pCreateInfo->surface;
-    sc->width = pCreateInfo->imageExtent.width > 0 ? pCreateInfo->imageExtent.width : 300;
-    sc->height = pCreateInfo->imageExtent.height > 0 ? pCreateInfo->imageExtent.height : 300;
+    sc->width = pCreateInfo->imageExtent.width > 0 ? pCreateInfo->imageExtent.width : 1280;
+    sc->height = pCreateInfo->imageExtent.height > 0 ? pCreateInfo->imageExtent.height : 720;
     sc->image_count = pCreateInfo->minImageCount > 0 ? pCreateInfo->minImageCount : 2;
 
     sc->images = calloc(sc->image_count, sizeof(struct VkImage_T));
+    size_t img_sz = (size_t)sc->width * sc->height * 4;
     for (uint32_t i = 0; i < sc->image_count; i++) {
         sc->images[i].swapchain = sc;
         sc->images[i].index = i;
         sc->images[i].width = sc->width;
         sc->images[i].height = sc->height;
-        if (device->kdev) {
-            sc->images[i].bo = pan_kmod_bo_alloc(device->kdev, sc->width * sc->height * 4, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
+        if (device && device->kdev) {
+            sc->images[i].bo = pan_kmod_bo_alloc(device->kdev, img_sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
         }
     }
+
+    sc->image_data = malloc(img_sz);
 
     if (sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
         uint8_t depth = sc->surface->depth ? sc->surface->depth : 24;
@@ -2723,12 +2726,10 @@ VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInf
 
         sc->xcb_gc = xcb_generate_id(sc->surface->connection);
         xcb_create_gc(sc->surface->connection, sc->xcb_gc, sc->surface->window, 0, NULL);
-        sc->image_data = malloc(sc->width * sc->height * 4);
     } else if (sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->surface->dpy && sc->surface->window) {
         int screen = DefaultScreen(sc->surface->dpy);
         XSetWindowBackgroundPixmap(sc->surface->dpy, sc->surface->window, None);
         sc->gc = XCreateGC(sc->surface->dpy, sc->surface->window, 0, NULL);
-        sc->image_data = malloc(sc->width * sc->height * 4);
         if (sc->image_data) {
             sc->ximage = XCreateImage(sc->surface->dpy, DefaultVisual(sc->surface->dpy, screen),
                                      24, ZPixmap, 0, sc->image_data, sc->width, sc->height, 32, 0);
@@ -2830,18 +2831,18 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
     if (!pPresentInfo || pPresentInfo->swapchainCount == 0) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkSwapchainKHR sc = pPresentInfo->pSwapchains[0];
+    uint32_t img_idx = pPresentInfo->pImageIndices ? pPresentInfo->pImageIndices[0] : 0;
     struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
     void *color_cpu = last_cmd ? v9_cmd_buffer_get_color_cpu(last_cmd) : NULL;
-    if (!color_cpu && pPresentInfo->pImageIndices && sc && sc->images) {
-        uint32_t idx = pPresentInfo->pImageIndices[0];
-        if (idx < sc->image_count && sc->images[idx].bo && sc->images[idx].bo->cpu) {
-            color_cpu = sc->images[idx].bo->cpu;
-        }
+
+    if (!color_cpu && sc && img_idx < sc->image_count && sc->images[img_idx].bo) {
+        color_cpu = sc->images[img_idx].bo->cpu;
     }
 
-    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p image_data=%p last_cmd=%p color_cpu=%p\n",
+    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p img_idx=%u image_data=%p last_cmd=%p color_cpu=%p\n",
               (void*)sc,
               sc ? (void*)sc->surface : NULL,
+              img_idx,
               sc ? sc->image_data : NULL,
               (void*)last_cmd, color_cpu);
 
@@ -2858,9 +2859,19 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
                 sc->width, sc->height, 0, 0, 0, depth,
                 sc->width * sc->height * 4, (const uint8_t *)sc->image_data);
             xcb_flush(sc->surface->connection);
-        } else if (sc->surface->dpy && sc->surface->window && sc->ximage && sc->gc) {
-            XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
-            XFlush(sc->surface->dpy);
+        } else if (sc->surface->dpy && sc->surface->window) {
+            if (!sc->gc) {
+                sc->gc = XCreateGC(sc->surface->dpy, sc->surface->window, 0, NULL);
+            }
+            if (!sc->ximage) {
+                int screen = DefaultScreen(sc->surface->dpy);
+                sc->ximage = XCreateImage(sc->surface->dpy, DefaultVisual(sc->surface->dpy, screen),
+                                         24, ZPixmap, 0, sc->image_data, sc->width, sc->height, 32, 0);
+            }
+            if (sc->ximage && sc->gc) {
+                XPutImage(sc->surface->dpy, sc->surface->window, sc->gc, sc->ximage, 0, 0, 0, 0, sc->width, sc->height);
+                XFlush(sc->surface->dpy);
+            }
         }
     }
     return VK_SUCCESS;
