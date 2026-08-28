@@ -1452,41 +1452,47 @@ VkResult vkCreatePipelineLayout(VkDevice device, const struct VkPipelineLayoutCr
     if (!pl) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     uint32_t binding_count = 0;
-    for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
-        if (pCreateInfo->pSetLayouts[set])
-            binding_count += pCreateInfo->pSetLayouts[set]->binding_count;
+    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->pSetLayouts) {
+        for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
+            if (pCreateInfo->pSetLayouts[set])
+                binding_count += pCreateInfo->pSetLayouts[set]->binding_count;
+        }
     }
-    pl->bindings = calloc(binding_count, sizeof(*pl->bindings));
-    if (binding_count && !pl->bindings) {
-        free(pl);
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (binding_count) {
+        pl->bindings = calloc(binding_count, sizeof(*pl->bindings));
+        if (!pl->bindings) {
+            free(pl);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
     }
 
     uint32_t index = 0;
     uint32_t ubo_index = 0;
     uint32_t tex_index = 0;
     uint32_t sampler_index = 0;
-    for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
-        VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
-        if (!set_layout) continue;
-        for (uint32_t i = 0; i < set_layout->binding_count; i++) {
-            const struct VkDescriptorSetLayoutBinding *binding = &set_layout->bindings[i];
-            struct panvk_v9_descriptor_binding *out = &pl->bindings[index++];
-            out->set = set;
-            out->binding = binding->binding;
-            out->descriptor_type = binding->descriptorType;
-            out->array_size = binding->descriptorCount;
-            if (binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-                binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-                out->resource_index = ubo_index;
-                ubo_index += binding->descriptorCount;
-            } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
-                       binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
-                out->resource_index = tex_index;
-                tex_index += binding->descriptorCount;
-            } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) {
-                out->resource_index = sampler_index;
-                sampler_index += binding->descriptorCount;
+    if (pCreateInfo->setLayoutCount > 0 && pCreateInfo->pSetLayouts && pl->bindings) {
+        for (uint32_t set = 0; set < pCreateInfo->setLayoutCount; set++) {
+            VkDescriptorSetLayout set_layout = pCreateInfo->pSetLayouts[set];
+            if (!set_layout) continue;
+            for (uint32_t i = 0; i < set_layout->binding_count; i++) {
+                const struct VkDescriptorSetLayoutBinding *binding = &set_layout->bindings[i];
+                struct panvk_v9_descriptor_binding *out = &pl->bindings[index++];
+                out->set = set;
+                out->binding = binding->binding;
+                out->descriptor_type = binding->descriptorType;
+                out->array_size = binding->descriptorCount;
+                if (binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                    binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                    out->resource_index = ubo_index;
+                    ubo_index += binding->descriptorCount;
+                } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                           binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+                    out->resource_index = tex_index;
+                    tex_index += binding->descriptorCount;
+                } else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+                    out->resource_index = sampler_index;
+                    sampler_index += binding->descriptorCount;
+                }
             }
         }
     }
