@@ -137,46 +137,37 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
     uint64_t nr_pages = aligned_size / page_size;
 
-    uint64_t mem_flags = 0x200F; /* CPU_RD|CPU_WR|GPU_RD|GPU_WR | SAME_VA(0x2000) */
+    uint64_t mem_flags = 0x000F; /* CPU_RD|CPU_WR|GPU_RD|GPU_WR */
     if (flags & KBASE_BO_PROT_EXEC) {
-        mem_flags = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x2000; /* 0x2017: CPU_RD|CPU_WR|GPU_RD|GPU_EX|SAME_VA */
+        mem_flags = 0x0017; /* CPU_RD|CPU_WR|GPU_RD|GPU_EX */
     }
 
     uint64_t mem[4] = { nr_pages, nr_pages, 0, mem_flags };
     if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC, mem) < 0) {
-        perror("kbase_bo_alloc: KBASE_IOCTL_MEM_ALLOC");
         return NULL;
     }
 
     int prot = PROT_READ | PROT_WRITE;
     if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
-    /* Hint a 32-bit virtual address (< 4GB) so 32-bit Wine / DXVK can map it without overflow */
-    uint64_t cur_hint = __sync_fetch_and_add(&next_hint_va, aligned_size);
-    if (cur_hint > 0x78000000ULL) {
-        next_hint_va = 0x20000000ULL;
-        cur_hint = 0x20000000ULL;
-    }
-
-    void *cpu_ptr = mmap((void *)(uintptr_t)cur_hint, aligned_size, prot, MAP_SHARED, dev->fd, mem[1]);
+    void *cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
     if (cpu_ptr == MAP_FAILED) {
-        /* Fallback to unhinted mmap if hint was occupied */
-        cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, mem[1]);
-        if (cpu_ptr == MAP_FAILED) {
-            perror("kbase_bo_alloc: mmap");
-            return NULL;
-        }
+        uint64_t free_va = mem[1];
+        ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
+        return NULL;
     }
 
     struct kbase_bo *bo = calloc(1, sizeof(*bo));
     if (!bo) {
         munmap(cpu_ptr, aligned_size);
+        uint64_t free_va = mem[1];
+        ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
         return NULL;
     }
 
     bo->dev = dev;
     bo->cpu = cpu_ptr;
-    bo->gpu = (uint64_t)(uintptr_t)cpu_ptr;
+    bo->gpu = mem[1];
     bo->size = aligned_size;
     bo->flags = flags;
 
