@@ -2641,7 +2641,12 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
                         uint32_t w = v9_cmd_buffer_get_width(cmd->v9_cmd);
                         uint32_t h = v9_cmd_buffer_get_height(cmd->v9_cmd);
                         if (color && queue->device) {
-                            if (w * h >= queue->device->last_rendered_w * queue->device->last_rendered_h) {
+                            if (h >= 100 && w * h >= queue->device->last_rendered_w * queue->device->last_rendered_h) {
+                                queue->device->last_rendered_color = color;
+                                queue->device->last_rendered_w = w;
+                                queue->device->last_rendered_h = h;
+                                queue->device->last_main_cmd = cmd->v9_cmd;
+                            } else if (!queue->device->last_main_cmd) {
                                 queue->device->last_rendered_color = color;
                                 queue->device->last_rendered_w = w;
                                 queue->device->last_rendered_h = h;
@@ -3018,24 +3023,23 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         last_cmd = queue->last_v9_cmd;
     }
 
-    if (sc && img_idx < sc->image_count && sc->images[img_idx].bo && sc->images[img_idx].bo->cpu) {
+    if (last_cmd) {
+        color_cpu = v9_cmd_buffer_get_color_cpu(last_cmd);
+        src_w = v9_cmd_buffer_get_width(last_cmd);
+        src_h = v9_cmd_buffer_get_height(last_cmd);
+        color_bytes = v9_cmd_buffer_get_color_size(last_cmd);
+    }
+    if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
+        color_cpu = queue->device->last_rendered_color;
+        src_w = queue->device->last_rendered_w ? queue->device->last_rendered_w : (sc ? sc->width : 1280);
+        src_h = queue->device->last_rendered_h ? queue->device->last_rendered_h : (sc ? sc->height : 720);
+        color_bytes = (size_t)src_w * src_h * 4;
+    }
+    if (!color_cpu && sc && img_idx < sc->image_count && sc->images[img_idx].bo && sc->images[img_idx].bo->cpu) {
         color_cpu = sc->images[img_idx].bo->cpu;
         src_w = sc->width;
         src_h = sc->height;
         color_bytes = (size_t)sc->width * sc->height * 4;
-    } else {
-        if (last_cmd) {
-            color_cpu = v9_cmd_buffer_get_color_cpu(last_cmd);
-            src_w = v9_cmd_buffer_get_width(last_cmd);
-            src_h = v9_cmd_buffer_get_height(last_cmd);
-            color_bytes = v9_cmd_buffer_get_color_size(last_cmd);
-        }
-        if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
-            color_cpu = queue->device->last_rendered_color;
-            src_w = queue->device->last_rendered_w ? queue->device->last_rendered_w : (sc ? sc->width : 1280);
-            src_h = queue->device->last_rendered_h ? queue->device->last_rendered_h : (sc ? sc->height : 720);
-            color_bytes = (size_t)src_w * src_h * 4;
-        }
     }
 
     uint32_t sample0 = 0, sample_mid = 0;
