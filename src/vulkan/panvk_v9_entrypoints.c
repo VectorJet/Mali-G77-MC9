@@ -287,6 +287,14 @@ static bool load_compiler(void) {
     }
     compiler_api.attempted = true;
 
+    compiler_api.attempted = true;
+
+    const char *jit_env = getenv("PANVK_ENABLE_JIT_COMPILER");
+    if (!jit_env || strcmp(jit_env, "1") != 0) {
+        pthread_mutex_unlock(&compiler_api_mutex);
+        return false;
+    }
+
     const char *path = getenv("PANVK_V9_COMPILER_LIBRARY");
     if (path && path[0]) {
         compiler_api.library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -301,12 +309,6 @@ static bool load_compiler(void) {
         compiler_api.library = dlopen("libpanvk_v9_compiler.so", RTLD_NOW | RTLD_LOCAL);
     }
     if (!compiler_api.library) {
-        const char *err = dlerror();
-        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
-        if (flog) {
-            fprintf(flog, "load_compiler dlopen failed: %s\n", err ? err : "unknown");
-            fclose(flog);
-        }
         pthread_mutex_unlock(&compiler_api_mutex);
         return false;
     }
@@ -314,12 +316,6 @@ static bool load_compiler(void) {
     compiler_api.compile = dlsym(compiler_api.library, "panvk_v9_compile_spirv");
     compiler_api.cleanup = dlsym(compiler_api.library, "panvk_v9_compiled_shader_cleanup");
     if (!compiler_api.compile || !compiler_api.cleanup) {
-        const char *err = dlerror();
-        FILE *flog = fopen("/data/data/com.termux/files/usr/tmp/panvk_debug.log", "a");
-        if (flog) {
-            fprintf(flog, "load_compiler dlsym failed: %s\n", err ? err : "unknown");
-            fclose(flog);
-        }
         dlclose(compiler_api.library);
         memset(&compiler_api, 0, sizeof(compiler_api));
         compiler_api.attempted = true;
