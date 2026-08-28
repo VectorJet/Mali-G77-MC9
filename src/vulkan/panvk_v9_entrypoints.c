@@ -18,6 +18,16 @@
 #define ICD_LOADER_MAGIC 0x01CDC0DEu
 #define PANVK_LOG(...) do { if (getenv("PANVK_DEBUG")) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
 
+static inline void panvk_trace(const char *func, const char *extra) {
+    FILE *f = fopen("/sdcard/Download/panvk_trace.log", "a");
+    if (f) {
+        if (extra) fprintf(f, "%s: %s\n", func, extra);
+        else fprintf(f, "%s\n", func);
+        fflush(f);
+        fclose(f);
+    }
+}
+
 static inline void set_loader_magic(void *object) {
     *(uintptr_t *)object = ICD_LOADER_MAGIC;
 }
@@ -1013,6 +1023,7 @@ void vkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice physicalDev
 }
 
 VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCreateInfo *pCreateInfo, void *pAllocator, VkDevice *pDevice) {
+    panvk_trace("vkCreateDevice", NULL);
     if (!physicalDevice || !pDevice) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct VkDevice_T *dev = calloc(1, sizeof(*dev));
@@ -2606,6 +2617,7 @@ VkResult vkGetPhysicalDeviceSurfacePresentModesKHR(VkPhysicalDevice physicalDevi
 
 /* Swapchain Implementation */
 VkResult vkCreateSwapchainKHR(VkDevice device, const struct VkSwapchainCreateInfoKHR *pCreateInfo, void *pAllocator, VkSwapchainKHR *pSwapchain) {
+    panvk_trace("vkCreateSwapchainKHR", NULL);
     if (!device || !pCreateInfo || !pSwapchain) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct VkSwapchainKHR_T *sc = calloc(1, sizeof(*sc));
@@ -2685,6 +2697,51 @@ VkResult vkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64
     static uint32_t g_current_image_idx = 0;
     *pImageIndex = (g_current_image_idx++) % (swapchain->image_count > 0 ? swapchain->image_count : 1);
     if (fence) ((VkFence)fence)->signaled = true;
+    return VK_SUCCESS;
+}
+
+VkResult vkAcquireNextImage2KHR(VkDevice device, const void *pAcquireInfo, uint32_t *pImageIndex) {
+    if (!pAcquireInfo || !pImageIndex) return VK_ERROR_INITIALIZATION_FAILED;
+    struct {
+        uint32_t sType;
+        uint32_t _pad;
+        const void *pNext;
+        VkSwapchainKHR swapchain;
+        uint64_t timeout;
+        void *semaphore;
+        void *fence;
+        uint32_t deviceMask;
+    } info;
+    memcpy(&info, pAcquireInfo, sizeof(info));
+    return vkAcquireNextImageKHR(device, info.swapchain, info.timeout, info.semaphore, info.fence, pImageIndex);
+}
+
+VkResult vkGetDeviceGroupPresentCapabilitiesKHR(VkDevice device, void *pDeviceGroupPresentCapabilities) {
+    if (!pDeviceGroupPresentCapabilities) return VK_ERROR_INITIALIZATION_FAILED;
+    memset(pDeviceGroupPresentCapabilities, 0, 144);
+    uint32_t *p = (uint32_t *)pDeviceGroupPresentCapabilities;
+    p[4] = 1; /* presentMask[0] = 1 */
+    p[36] = 1; /* modes = VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR (1) */
+    return VK_SUCCESS;
+}
+
+VkResult vkGetDeviceGroupSurfacePresentModesKHR(VkDevice device, VkSurfaceKHR surface, uint32_t *pModes) {
+    if (!pModes) return VK_ERROR_INITIALIZATION_FAILED;
+    *pModes = 1; /* VK_DEVICE_GROUP_PRESENT_MODE_LOCAL_BIT_KHR */
+    return VK_SUCCESS;
+}
+
+VkResult vkGetPhysicalDevicePresentRectanglesKHR(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, uint32_t *pRectCount, void *pRects) {
+    if (!pRectCount) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pRects) {
+        *pRectCount = 1;
+        return VK_SUCCESS;
+    }
+    struct { int32_t x, y; uint32_t w, h; } *rect = pRects;
+    rect->x = 0; rect->y = 0;
+    rect->w = surface ? surface->width : 1280;
+    rect->h = surface ? surface->height : 720;
+    *pRectCount = 1;
     return VK_SUCCESS;
 }
 
@@ -3365,10 +3422,15 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkDestroySwapchainKHR);
     MATCH(vkGetSwapchainImagesKHR);
     MATCH(vkAcquireNextImageKHR);
+    MATCH(vkAcquireNextImage2KHR);
+    MATCH(vkGetDeviceGroupPresentCapabilitiesKHR);
+    MATCH(vkGetDeviceGroupSurfacePresentModesKHR);
+    MATCH(vkGetPhysicalDevicePresentRectanglesKHR);
     MATCH(vkQueuePresentKHR);
     MATCH(panvk_v9_read_pixel);
     MATCH(vk_icdGetPhysicalDeviceProcAddr);
 #undef MATCH
+    if (pName) panvk_trace("UNRESOLVED", pName);
     return NULL;
 }
 
