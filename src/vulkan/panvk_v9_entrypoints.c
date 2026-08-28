@@ -81,6 +81,9 @@ struct VkDevice_T {
     void *last_rendered_color;
 };
 
+static struct VkDevice_T *g_global_device = NULL;
+static struct pan_kmod_dev *g_global_kdev = NULL;
+
 struct VkQueue_T {
     uintptr_t loader_data;
     struct VkDevice_T *device;
@@ -1097,6 +1100,8 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
         set_loader_magic(dev->queue);
         dev->queue->device = dev;
     }
+    g_global_device = dev;
+    g_global_kdev = dev->kdev;
     *pDevice = dev;
     PANVK_LOG("vkCreateDevice SUCCESS dev=%p kdev=%p queue=%p\n", dev, dev->kdev, dev->queue);
     return VK_SUCCESS;
@@ -2100,17 +2105,15 @@ void vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool, void *pAll
 }
 
 VkResult vkAllocateCommandBuffers(VkDevice device, const struct VkCommandBufferAllocateInfo *pAllocateInfo, VkCommandBuffer *pCommandBuffers) {
-    if (!device || !pAllocateInfo || !pCommandBuffers) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pAllocateInfo || !pCommandBuffers) return VK_ERROR_INITIALIZATION_FAILED;
+
+    VkDevice dev = device ? device : g_global_device;
 
     for (uint32_t i = 0; i < pAllocateInfo->commandBufferCount; i++) {
         struct VkCommandBuffer_T *cb = calloc(1, sizeof(*cb));
         if (!cb) return VK_ERROR_OUT_OF_HOST_MEMORY;
         set_loader_magic(cb);
-        cb->device = device;
-        struct v9_render_target_config default_cfg = { 1280, 720, 0xFF333333 };
-        if (device && device->kdev) {
-            cb->v9_cmd = v9_cmd_buffer_create(device->kdev, &default_cfg);
-        }
+        cb->device = dev;
         pCommandBuffers[i] = cb;
     }
     return VK_SUCCESS;
@@ -2135,13 +2138,6 @@ VkResult vkBeginCommandBuffer(VkCommandBuffer commandBuffer, const struct VkComm
     commandBuffer->viewport_set = false;
     commandBuffer->scissor_set = false;
     memset(commandBuffer->descriptor_sets, 0, sizeof(commandBuffer->descriptor_sets));
-    if (!commandBuffer->v9_cmd && commandBuffer->device && commandBuffer->device->kdev) {
-        struct v9_render_target_config default_cfg = { 1280, 720, 0xFF333333 };
-        commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &default_cfg);
-    }
-    if (commandBuffer->v9_cmd) {
-        v9_cmd_buffer_begin(commandBuffer->v9_cmd);
-    }
     return VK_SUCCESS;
 }
 
@@ -2355,7 +2351,23 @@ static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
     v9_cmd_buffer_set_attributes(commandBuffer->v9_cmd, attrs, attr_count);
 }
 
+static void ensure_command_buffer_v9(VkCommandBuffer cb) {
+    if (!cb || cb->v9_cmd) return;
+    struct pan_kmod_dev *kdev = (cb->device && cb->device->kdev) ?
+                                cb->device->kdev : g_global_kdev;
+    if (!kdev) {
+        g_global_kdev = pan_kmod_dev_create(NULL);
+        kdev = g_global_kdev;
+    }
+    if (kdev) {
+        struct v9_render_target_config cfg = { .width = 1280, .height = 720, .clear_color = 0xFF333333 };
+        cb->v9_cmd = v9_cmd_buffer_create(kdev, &cfg);
+        if (cb->v9_cmd) v9_cmd_buffer_begin(cb->v9_cmd);
+    }
+}
+
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
+    ensure_command_buffer_v9(commandBuffer);
     PANVK_LOG("vkCmdDraw: cb=%p v9_cmd=%p vertCount=%u\n", (void*)commandBuffer, commandBuffer ? (void*)commandBuffer->v9_cmd : NULL, vertexCount);
     if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
@@ -2389,8 +2401,6 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
                           const struct VkRenderPassBeginInfo *pRenderPassBegin,
                           uint32_t contents) {
     if (!commandBuffer || !pRenderPassBegin) return;
-    PANVK_LOG("vkCmdBeginRenderPass: cb=%p fb=%p\n",
-              (void*)commandBuffer, (void*)pRenderPassBegin->framebuffer);
 
     uint32_t clear_color = 0;
     if (pRenderPassBegin->clearValueCount > 0 && pRenderPassBegin->pClearValues) {
@@ -2429,13 +2439,23 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         }
     }
 
-    if (!commandBuffer->v9_cmd) {
-        if (commandBuffer->device && commandBuffer->device->kdev) {
-            commandBuffer->v9_cmd = v9_cmd_buffer_create(commandBuffer->device->kdev, &config);
-        }
-    }
     if (commandBuffer->v9_cmd) {
-        v9_cmd_buffer_set_config(commandBuffer->v9_cmd, &config);
+        v9_cmd_buffer_destroy(commandBuffer->v9_cmd);
+        commandBuffer->v9_cmd = NULL;
+    }
+    struct pan_kmod_dev *kdev = (commandBuffer->device && commandBuffer->device->kdev) ?
+                                commandBuffer->device->kdev : g_global_kdev;
+    if (!kdev) {
+        g_global_kdev = pan_kmod_dev_create(NULL);
+        kdev = g_global_kdev;
+    }
+    if (kdev) {
+        commandBuffer->v9_cmd = v9_cmd_buffer_create(kdev, &config);
+    }
+    PANVK_LOG("vkCmdBeginRenderPass: cb=%p fb=%p kdev=%p -> v9_cmd=%p\n",
+              (void*)commandBuffer, (void*)pRenderPassBegin->framebuffer,
+              (void*)kdev, (void*)commandBuffer->v9_cmd);
+    if (commandBuffer->v9_cmd) {
         v9_cmd_buffer_begin(commandBuffer->v9_cmd);
     }
 }
@@ -2479,6 +2499,7 @@ void vkCmdEndRenderPass2KHR(VkCommandBuffer commandBuffer, const void *pSubpassE
 }
 
 void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+    ensure_command_buffer_v9(commandBuffer);
     PANVK_LOG("vkCmdDrawIndexed: cb=%p v9_cmd=%p idxCount=%u instCount=%u\n",
               (void*)commandBuffer, commandBuffer ? (void*)commandBuffer->v9_cmd : NULL, indexCount, instanceCount);
     if (commandBuffer && commandBuffer->v9_cmd && indexCount > 0 && instanceCount > 0 &&
