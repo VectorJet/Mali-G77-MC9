@@ -150,7 +150,16 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     int prot = PROT_READ | PROT_WRITE;
     if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
-    void *cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    void *hint = (void *)(uintptr_t)next_hint_va;
+    next_hint_va += aligned_size;
+    if (next_hint_va > 0x70000000ULL) {
+        next_hint_va = 0x20000000ULL;
+    }
+
+    void *cpu_ptr = mmap(hint, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    if (cpu_ptr == MAP_FAILED) {
+        cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
+    }
     if (cpu_ptr == MAP_FAILED) {
         uint64_t free_va = mem[1];
         ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
