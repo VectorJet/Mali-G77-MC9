@@ -16,13 +16,34 @@
 #include "panvk_v9_entrypoints.h"
 #include "panvk_v9_compiler.h"
 
+#include <stdarg.h>
+
 #define ICD_LOADER_MAGIC 0x01CDC0DEu
+
+static inline void panvk_file_log(const char *fmt, ...) {
+    FILE *f = fopen("/sdcard/Download/panvk_debug.log", "a");
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fflush(f);
+        fclose(f);
+    }
+}
 
 #ifdef ANDROID
 #include <android/log.h>
-#define PANVK_LOG(...) do { __android_log_print(ANDROID_LOG_INFO, "PANVK", __VA_ARGS__); } while(0)
+#define PANVK_LOG(...) do { \
+    __android_log_print(ANDROID_LOG_INFO, "PANVK", __VA_ARGS__); \
+    panvk_file_log(__VA_ARGS__); \
+} while(0)
 #else
-#define PANVK_LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
+#define PANVK_LOG(...) do { \
+    fprintf(stderr, __VA_ARGS__); \
+    fflush(stderr); \
+    panvk_file_log(__VA_ARGS__); \
+} while(0)
 #endif
 
 static inline void panvk_trace(const char *func, const char *extra) {
