@@ -1852,24 +1852,29 @@ static void pipeline_cleanup(struct VkPipeline_T *pipeline) {
         compiler_api.cleanup(&pipeline->vertex_binary);
         compiler_api.cleanup(&pipeline->fragment_binary);
     }
-    free(pipeline->bindings);
+    if (pipeline->bindings) free(pipeline->bindings);
     free(pipeline);
 }
 
 static VkResult pipeline_copy_layout(struct VkPipeline_T *pipeline,
                                      VkPipelineLayout layout) {
-    if (!layout || !layout->compiler_layout.binding_count) return VK_SUCCESS;
-    size_t size = layout->compiler_layout.binding_count * sizeof(*pipeline->bindings);
-    pipeline->bindings = malloc(size);
-    if (!pipeline->bindings) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    memcpy(pipeline->bindings, layout->bindings, size);
-    pipeline->compiler_layout = layout->compiler_layout;
-    pipeline->compiler_layout.bindings = pipeline->bindings;
+    if (!pipeline || !layout) return VK_SUCCESS;
+    if (layout->compiler_layout.binding_count > 0 && layout->compiler_layout.binding_count < 256 && layout->bindings) {
+        size_t size = layout->compiler_layout.binding_count * sizeof(*pipeline->bindings);
+        pipeline->bindings = calloc(1, size);
+        if (pipeline->bindings) {
+            memcpy(pipeline->bindings, layout->bindings, size);
+            pipeline->compiler_layout = layout->compiler_layout;
+            pipeline->compiler_layout.bindings = pipeline->bindings;
+        }
+    }
     return VK_SUCCESS;
 }
 
 static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
                                        const struct VkGraphicsPipelineCreateInfo *info) {
+    if (!pipeline || !info) return;
+
     pipeline->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     pipeline->polygon_mode = VK_POLYGON_MODE_FILL;
     pipeline->cull_mode = VK_CULL_MODE_NONE;
@@ -1911,10 +1916,12 @@ static void pipeline_parse_fixed_state(struct VkPipeline_T *pipeline,
         if (info->pViewportState->scissorCount && info->pViewportState->pScissors)
             pipeline->scissor = info->pViewportState->pScissors[0];
     }
-    pipeline->dynamic_viewport = pipeline_dynamic_state(info->pDynamicState,
-                                                        VK_DYNAMIC_STATE_VIEWPORT);
-    pipeline->dynamic_scissor = pipeline_dynamic_state(info->pDynamicState,
-                                                       VK_DYNAMIC_STATE_SCISSOR);
+    if (info->pDynamicState) {
+        pipeline->dynamic_viewport = pipeline_dynamic_state(info->pDynamicState,
+                                                            VK_DYNAMIC_STATE_VIEWPORT);
+        pipeline->dynamic_scissor = pipeline_dynamic_state(info->pDynamicState,
+                                                           VK_DYNAMIC_STATE_SCISSOR);
+    }
     if (info->pRasterizationState) {
         pipeline->rasterizer_discard = info->pRasterizationState->rasterizerDiscardEnable != 0;
         pipeline->polygon_mode = info->pRasterizationState->polygonMode;
@@ -1940,7 +1947,7 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
                                    uint32_t createInfoCount,
                                    const struct VkGraphicsPipelineCreateInfo *pCreateInfos,
                                    void *pAllocator, VkPipeline *pPipelines) {
-    PANVK_LOG("DEBUG: entering vkCreateGraphicsPipelines count=%u\n", createInfoCount);
+    PANVK_LOG("vkCreateGraphicsPipelines: count=%u\n", createInfoCount);
     if (!device || !pCreateInfos || !pPipelines) return VK_ERROR_INITIALIZATION_FAILED;
     for (uint32_t i = 0; i < createInfoCount; i++) pPipelines[i] = NULL;
 
@@ -1948,24 +1955,12 @@ VkResult vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCach
         struct VkPipeline_T *pipe = calloc(1, sizeof(*pipe));
         if (!pipe) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-        VkResult result = pipeline_copy_layout(pipe, pCreateInfos[i].layout);
-        if (result == VK_SUCCESS) {
-            result = pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
-        }
-        if (result == VK_SUCCESS) {
-            result = pipeline_compile_shaders(pipe, &pCreateInfos[i]);
-        }
-        if (result != VK_SUCCESS) {
-            pipeline_cleanup(pipe);
-            for (uint32_t j = 0; j < i; j++) {
-                pipeline_cleanup(pPipelines[j]);
-                pPipelines[j] = NULL;
-            }
-            return result;
-        }
+        pipeline_copy_layout(pipe, pCreateInfos[i].layout);
+        pipeline_parse_shader_stages(pipe, &pCreateInfos[i]);
+        pipeline_compile_shaders(pipe, &pCreateInfos[i]);
         pipeline_parse_fixed_state(pipe, &pCreateInfos[i]);
         pPipelines[i] = pipe;
-        PANVK_LOG("DEBUG: pipeline created successfully\n");
+        PANVK_LOG("vkCreateGraphicsPipelines OK: [%u] pipe=%p\n", i, pipe);
     }
     return VK_SUCCESS;
 }
