@@ -3059,17 +3059,12 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
               (void*)last_cmd, color_cpu, src_w, src_h, sample0, sample_mid);
 
     if (sc && sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->image_data) {
-        if (color_cpu && src_w > 0 && src_h > 0) {
-            if (src_w == sc->width && src_h == sc->height) {
-                memcpy(sc->image_data, color_cpu, sc->width * sc->height * 4);
-            } else {
-                uint32_t copy_w = src_w < sc->width ? src_w : sc->width;
-                uint32_t copy_h = src_h < sc->height ? src_h : sc->height;
-                for (uint32_t y = 0; y < copy_h; y++) {
-                    memcpy((uint8_t *)sc->image_data + y * sc->width * 4,
-                           (const uint8_t *)color_cpu + y * src_w * 4,
-                           copy_w * 4);
-                }
+        if (color_cpu) {
+            size_t copy_bytes = (size_t)sc->width * sc->height * 4;
+            if (copy_bytes <= color_bytes) {
+                memcpy(sc->image_data, color_cpu, copy_bytes);
+            } else if (color_bytes > 0) {
+                memcpy(sc->image_data, color_cpu, color_bytes);
             }
         }
 
