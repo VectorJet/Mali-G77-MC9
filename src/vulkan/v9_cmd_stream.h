@@ -74,6 +74,9 @@ uint64_t v9_cmd_buffer_get_pos_gpu(struct v9_cmd_buffer *cmd);
 uint64_t v9_cmd_buffer_get_idx_gpu(struct v9_cmd_buffer *cmd);
 uint32_t v9_cmd_buffer_read_pixel(struct v9_cmd_buffer *cmd, uint32_t x, uint32_t y);
 void *v9_cmd_buffer_get_color_cpu(struct v9_cmd_buffer *cmd);
+uint32_t v9_cmd_buffer_get_width(struct v9_cmd_buffer *cmd);
+uint32_t v9_cmd_buffer_get_height(struct v9_cmd_buffer *cmd);
+size_t v9_cmd_buffer_get_color_size(struct v9_cmd_buffer *cmd);
 
 #ifdef __cplusplus
 }

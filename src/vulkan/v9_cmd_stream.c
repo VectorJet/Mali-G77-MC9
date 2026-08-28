@@ -7,6 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/mman.h>
+#include <errno.h>
+
+extern void panvk_log(const char *fmt, ...);
+#define PANVK_LOG panvk_log
 
 #include "v9_cmd_stream.h"
 #include "v9_pack.h"
@@ -77,10 +82,16 @@ struct v9_cmd_buffer {
 
 struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
                                            const struct v9_render_target_config *config) {
-    if (!dev || !config || config->width == 0 || config->height == 0) return NULL;
+    if (!dev || !config || config->width == 0 || config->height == 0) {
+        PANVK_LOG("v9_cmd_buffer_create: INVALID args dev=%p config=%p w=%u h=%u\n", (void*)dev, (void*)config, config ? config->width : 0, config ? config->height : 0);
+        return NULL;
+    }
 
     struct v9_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
-    if (!cmd) return NULL;
+    if (!cmd) {
+        PANVK_LOG("v9_cmd_buffer_create: calloc failed\n");
+        return NULL;
+    }
 
     cmd->refcount = 1;
     cmd->dev = dev;
@@ -91,6 +102,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     size_t color_bytes = aligned_w * aligned_h * 4;
     cmd->color_bo = pan_kmod_bo_alloc(dev, color_bytes, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     if (!cmd->color_bo) {
+        PANVK_LOG("v9_cmd_buffer_create: pan_kmod_bo_alloc color_bo failed! size=%zu\n", color_bytes);
         free(cmd);
         return NULL;
     }
@@ -99,6 +111,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     size_t mem_size = 0x100000; /* 1 MiB for descriptors and tiler heap */
     cmd->mem_bo = pan_kmod_bo_alloc(dev, mem_size, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     if (!cmd->mem_bo) {
+        PANVK_LOG("v9_cmd_buffer_create: pan_kmod_bo_alloc mem_bo failed! size=%zu\n", mem_size);
         pan_kmod_bo_free(cmd->color_bo);
         free(cmd);
         return NULL;
@@ -119,6 +132,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     cmd->exec_bo = pan_kmod_bo_alloc(dev, 4096,
                                      PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE | PAN_KMOD_BO_FLAG_EXEC);
     if (!cmd->exec_bo) {
+        PANVK_LOG("v9_cmd_buffer_create: pan_kmod_bo_alloc exec_bo failed!\n");
         pan_kmod_bo_free(cmd->mem_bo);
         pan_kmod_bo_free(cmd->color_bo);
         free(cmd);
@@ -129,7 +143,7 @@ struct v9_cmd_buffer *v9_cmd_buffer_create(struct pan_kmod_dev *dev,
     uint8_t *base_cpu = (uint8_t *)cmd->mem_bo->cpu;
 
     cmd->color_gpu               = cmd->color_bo->gpu;
-    printf("v9_cmd_buffer_create: color_gpu=0x%llx (size=%zu)\n",
+    PANVK_LOG("v9_cmd_buffer_create: color_gpu=0x%llx (size=%zu)\n",
            (unsigned long long)cmd->color_gpu, color_bytes);
     cmd->mfbd_gva                 = base_gva + 0x6000;
     cmd->rt0_gpu                  = base_gva + 0x6080;
@@ -816,4 +830,16 @@ uint32_t v9_cmd_buffer_read_pixel(struct v9_cmd_buffer *cmd, uint32_t x, uint32_
 void *v9_cmd_buffer_get_color_cpu(struct v9_cmd_buffer *cmd) {
     if (!cmd || !cmd->color_bo) return NULL;
     return cmd->color_bo->cpu;
+}
+
+uint32_t v9_cmd_buffer_get_width(struct v9_cmd_buffer *cmd) {
+    return cmd ? cmd->config.width : 0;
+}
+
+uint32_t v9_cmd_buffer_get_height(struct v9_cmd_buffer *cmd) {
+    return cmd ? cmd->config.height : 0;
+}
+
+size_t v9_cmd_buffer_get_color_size(struct v9_cmd_buffer *cmd) {
+    return (cmd && cmd->color_bo) ? cmd->color_bo->size : 0;
 }

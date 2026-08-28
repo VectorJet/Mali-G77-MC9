@@ -45,6 +45,21 @@ static inline void panvk_file_log(const char *fmt, ...) {
     panvk_file_log(__VA_ARGS__); \
 } while(0)
 #endif
+void panvk_log(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+#ifdef ANDROID
+    __android_log_print(ANDROID_LOG_INFO, "PANVK", "%s", buf);
+#else
+    fprintf(stderr, "%s", buf);
+    fflush(stderr);
+#endif
+    panvk_file_log("%s", buf);
+}
+
 
 static inline void panvk_trace(const char *func, const char *extra) {
     if (extra) {
@@ -1096,6 +1111,7 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
     }
 
     dev->queue = calloc(1, sizeof(*dev->queue));
+    pthread_mutex_init(&dev->mem_mutex, NULL);
     if (dev->queue) {
         set_loader_magic(dev->queue);
         dev->queue->device = dev;
@@ -2939,23 +2955,39 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         color_cpu = sc->images[img_idx].bo->cpu;
     }
 
+    uint32_t src_w = last_cmd ? v9_cmd_buffer_get_width(last_cmd) : (sc ? sc->width : 0);
+    uint32_t src_h = last_cmd ? v9_cmd_buffer_get_height(last_cmd) : (sc ? sc->height : 0);
+    size_t color_bytes = last_cmd ? v9_cmd_buffer_get_color_size(last_cmd) : 0;
+
     uint32_t sample0 = 0, sample_mid = 0;
     if (color_cpu) {
         sample0 = *(uint32_t *)color_cpu;
-        uint32_t total_px = (sc ? sc->width * sc->height : 0);
-        if (total_px > 0) sample_mid = ((uint32_t *)color_cpu)[total_px / 2];
+        uint32_t total_px = src_w * src_h;
+        if (total_px > 0 && color_bytes >= total_px * sizeof(uint32_t)) {
+            sample_mid = ((uint32_t *)color_cpu)[total_px / 2];
+        }
     }
 
-    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p img_idx=%u image_data=%p last_cmd=%p color_cpu=%p pix[0]=0x%08x pix[mid]=0x%08x\n",
+    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p img_idx=%u image_data=%p last_cmd=%p color_cpu=%p (src=%ux%u) pix[0]=0x%08x pix[mid]=0x%08x\n",
               (void*)sc,
               sc ? (void*)sc->surface : NULL,
               img_idx,
               sc ? sc->image_data : NULL,
-              (void*)last_cmd, color_cpu, sample0, sample_mid);
+              (void*)last_cmd, color_cpu, src_w, src_h, sample0, sample_mid);
 
     if (sc && sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->image_data) {
-        if (color_cpu) {
-            memcpy(sc->image_data, color_cpu, sc->width * sc->height * 4);
+        if (color_cpu && src_w > 0 && src_h > 0) {
+            if (src_w == sc->width && src_h == sc->height) {
+                memcpy(sc->image_data, color_cpu, sc->width * sc->height * 4);
+            } else {
+                uint32_t copy_w = src_w < sc->width ? src_w : sc->width;
+                uint32_t copy_h = src_h < sc->height ? src_h : sc->height;
+                for (uint32_t y = 0; y < copy_h; y++) {
+                    memcpy((uint8_t *)sc->image_data + y * sc->width * 4,
+                           (const uint8_t *)color_cpu + y * src_w * 4,
+                           copy_w * 4);
+                }
+            }
         }
 
         if (sc->surface->is_xcb && sc->surface->connection && sc->surface->window) {
