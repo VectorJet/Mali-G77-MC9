@@ -159,7 +159,8 @@ int pan_kmod_submit_atoms_chained(struct pan_kmod_dev *dev,
             ev_ret = kbase_wait_event_timeout(dev->kdev, &rx_atom, &rx_code, timeout_ms);
         }
         if (ev_ret < 0 && overall_status == 0) overall_status = ev_ret;
-        if (rx_code != 0x1 && overall_status == 0) overall_status = -EIO;
+        bool is_done = (rx_code == 0x1 || rx_code == 0x40);
+        if (!is_done && overall_status == 0) overall_status = -EIO;
         last_code = rx_code;
     }
 

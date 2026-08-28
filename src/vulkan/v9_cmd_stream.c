@@ -742,7 +742,8 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
         };
 
         ret = pan_kmod_submit_atoms_chained(cmd->dev, atoms, 4, &event_code, 250);
-        if (ret != 0 || event_code != 0x1) {
+        PANVK_LOG("pan_kmod_submit_atoms_chained: ret=%d event_code=0x%x\n", ret, event_code);
+        if (ret != 0 || (event_code != 0x1 && event_code != 0x40)) {
             rasterize_3d_geometry(cmd);
             return 0;
         }

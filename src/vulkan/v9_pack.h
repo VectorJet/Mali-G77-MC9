@@ -224,7 +224,6 @@ static inline void v9_pack_tiler_job(uint32_t *vt, uint32_t width, uint32_t heig
 static inline void v9_pack_frag_job_chain(uint32_t *fj1, uint32_t *fj2,
                                            uint64_t mfbd1_gpu, uint64_t mfbd2_gpu,
                                            uint64_t fj2_gpu, uint32_t width, uint32_t height) {
-    (void)fj2_gpu;
     /* Job 2: End-of-frame / completion pass */
     memset(fj2, 0, 128);
     fj2[4] = (2u << 16) | (9u << 1);  /* 0x00020012: index 2 in chain, Type 9 */
@@ -238,7 +237,7 @@ static inline void v9_pack_frag_job_chain(uint32_t *fj1, uint32_t *fj2,
     memset(fj1, 0, 128);
     fj1[4] = (1u << 16) | (9u << 1);   /* 0x00010012: index 1 in chain, Type 9 */
     fj1[5] = 0;
-    pack_u64(fj1 + 6, 0);
+    pack_u64(fj1 + 6, fj2_gpu ? (fj2_gpu | 0x01u) : 0); /* Chain to Job 2 */
     fj1[8] = 0;
     fj1[9] = ((width - 1) >> 4) | (((height - 1) >> 4) << 16);
     pack_u64(fj1 + 10, mfbd1_gpu | 0x01u); /* Polygon List Mode */
