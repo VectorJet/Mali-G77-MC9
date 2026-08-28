@@ -128,7 +128,7 @@ void kbase_dev_close(struct kbase_dev *dev) {
     free(dev);
 }
 
-static uint64_t g_kbase_hint_va = 0x20000000ULL;
+static uint64_t next_hint_va = 0x20000000ULL; /* Start at 512MB in low 32-bit space */
 
 struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t flags) {
     if (!dev || size == 0) return NULL;
@@ -150,22 +150,7 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     int prot = PROT_READ | PROT_WRITE;
     if (flags & KBASE_BO_PROT_EXEC) prot |= PROT_EXEC;
 
-    /* Reserve a clean, non-conflicting virtual address range in 32-bit space (< 2GB) */
-    uint64_t hint = __sync_fetch_and_add(&g_kbase_hint_va, aligned_size);
-    if (hint > 0x70000000ULL) {
-        g_kbase_hint_va = 0x20000000ULL;
-        hint = 0x20000000ULL;
-    }
-
-    void *reserved = mmap((void *)(uintptr_t)hint, aligned_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    void *cpu_ptr = MAP_FAILED;
-    if (reserved != MAP_FAILED) {
-        cpu_ptr = mmap(reserved, aligned_size, prot, MAP_SHARED | MAP_FIXED, dev->fd, (off_t)mem[1]);
-    }
-    if (cpu_ptr == MAP_FAILED) {
-        if (reserved != MAP_FAILED) munmap(reserved, aligned_size);
-        cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
-    }
+    void *cpu_ptr = mmap(NULL, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
     if (cpu_ptr == MAP_FAILED) {
         uint64_t free_va = mem[1];
         ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
@@ -175,7 +160,7 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
     struct kbase_bo *bo = calloc(1, sizeof(*bo));
     if (!bo) {
         munmap(cpu_ptr, aligned_size);
-        uint64_t free_va = (uint64_t)(uintptr_t)cpu_ptr;
+        uint64_t free_va = mem[1];
         ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_va);
         return NULL;
     }
