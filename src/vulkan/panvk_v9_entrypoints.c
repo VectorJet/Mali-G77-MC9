@@ -1137,7 +1137,7 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
         g_next_low_hint = 0x20000000ULL;
         hint = 0x20000000ULL;
     }
-    mem->low_cpu = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    mem->low_cpu = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (mem->low_cpu == MAP_FAILED) {
         mem->low_cpu = mmap(NULL, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     }
