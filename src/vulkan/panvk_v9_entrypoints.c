@@ -1710,6 +1710,9 @@ VkResult vkCreateFramebuffer(VkDevice device, const void *pCreateInfo, void *pAl
         fb->height = ci.height;
         fb->layers = ci.layers;
         fb->attachment_count = ci.attachmentCount;
+        PANVK_LOG("vkCreateFramebuffer: fb=%p w=%u h=%u layers=%u attCount=%u att0=%p\n",
+                  (void*)fb, fb->width, fb->height, fb->layers, fb->attachment_count,
+                  (ci.attachmentCount > 0 && ci.pAttachments) ? (void*)ci.pAttachments[0] : NULL);
         if (ci.attachmentCount > 0 && ci.pAttachments) {
             fb->attachments = calloc(ci.attachmentCount, sizeof(VkImageView));
             if (fb->attachments)
@@ -2293,18 +2296,30 @@ void vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage, uin
 
 void vkCmdCopyImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
                     VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions) {
-    (void)commandBuffer; (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions;
-    if (!srcImage || !srcImage->bo || !dstImage || !dstImage->bo) return;
-    size_t sz = srcImage->bo->size < dstImage->bo->size ? srcImage->bo->size : dstImage->bo->size;
-    memcpy(dstImage->bo->cpu, srcImage->bo->cpu, sz);
+    (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+    if (!dstImage || !dstImage->bo || !dstImage->bo->cpu) return;
+    const void *src_ptr = (srcImage && srcImage->bo && srcImage->bo->cpu) ? srcImage->bo->cpu : NULL;
+    if (!src_ptr && commandBuffer && commandBuffer->v9_cmd) {
+        src_ptr = v9_cmd_buffer_get_color_cpu(commandBuffer->v9_cmd);
+    }
+    if (src_ptr) {
+        size_t sz = dstImage->bo->size;
+        memcpy(dstImage->bo->cpu, src_ptr, sz);
+    }
 }
 
 void vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
                     VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions, uint32_t filter) {
-    (void)commandBuffer; (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions; (void)filter;
-    if (!srcImage || !srcImage->bo || !dstImage || !dstImage->bo) return;
-    size_t sz = srcImage->bo->size < dstImage->bo->size ? srcImage->bo->size : dstImage->bo->size;
-    memcpy(dstImage->bo->cpu, srcImage->bo->cpu, sz);
+    (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions; (void)filter;
+    if (!dstImage || !dstImage->bo || !dstImage->bo->cpu) return;
+    const void *src_ptr = (srcImage && srcImage->bo && srcImage->bo->cpu) ? srcImage->bo->cpu : NULL;
+    if (!src_ptr && commandBuffer && commandBuffer->v9_cmd) {
+        src_ptr = v9_cmd_buffer_get_color_cpu(commandBuffer->v9_cmd);
+    }
+    if (src_ptr) {
+        size_t sz = dstImage->bo->size;
+        memcpy(dstImage->bo->cpu, src_ptr, sz);
+    }
 }
 
 void vkCmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout,
@@ -2503,7 +2518,7 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
     commandBuffer->target_swapchain_image = NULL;
     if (fb && fb->attachment_count > 0 && fb->attachments && fb->attachments[0]) {
         VkImageView view = fb->attachments[0];
-        if (view && view->image && view->image->swapchain) {
+        if (view && view->image) {
             commandBuffer->target_swapchain_image = view->image;
         }
     }
@@ -2653,10 +2668,11 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
                                 queue->device->last_main_cmd = cmd->v9_cmd;
                             }
                         }
-                        if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo) {
+                        if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo && cmd->target_swapchain_image->bo->cpu) {
                             size_t sz = (size_t)cmd->target_swapchain_image->width * cmd->target_swapchain_image->height * 4;
+                            if (sz == 0) sz = cmd->target_swapchain_image->bo->size;
                             size_t src_sz = v9_cmd_buffer_get_color_size(cmd->v9_cmd);
-                            size_t copy_sz = src_sz < sz ? src_sz : sz;
+                            size_t copy_sz = (src_sz > 0 && src_sz < sz) ? src_sz : sz;
                             memcpy(cmd->target_swapchain_image->bo->cpu, color, copy_sz);
                         }
                     }
@@ -3023,23 +3039,29 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         last_cmd = queue->last_v9_cmd;
     }
 
-    if (last_cmd) {
-        color_cpu = v9_cmd_buffer_get_color_cpu(last_cmd);
-        src_w = v9_cmd_buffer_get_width(last_cmd);
-        src_h = v9_cmd_buffer_get_height(last_cmd);
-        color_bytes = v9_cmd_buffer_get_color_size(last_cmd);
+    if (sc && img_idx < sc->image_count && sc->images[img_idx].bo && sc->images[img_idx].bo->cpu) {
+        uint32_t *sc_pixels = (uint32_t *)sc->images[img_idx].bo->cpu;
+        uint32_t mid = (sc->width * sc->height) / 2;
+        if (sc_pixels[0] != 0 || sc_pixels[mid] != 0) {
+            color_cpu = sc->images[img_idx].bo->cpu;
+            src_w = sc->width;
+            src_h = sc->height;
+            color_bytes = (size_t)sc->width * sc->height * 4;
+        }
     }
-    if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
-        color_cpu = queue->device->last_rendered_color;
-        src_w = queue->device->last_rendered_w ? queue->device->last_rendered_w : (sc ? sc->width : 1280);
-        src_h = queue->device->last_rendered_h ? queue->device->last_rendered_h : (sc ? sc->height : 720);
-        color_bytes = (size_t)src_w * src_h * 4;
-    }
-    if (!color_cpu && sc && img_idx < sc->image_count && sc->images[img_idx].bo && sc->images[img_idx].bo->cpu) {
-        color_cpu = sc->images[img_idx].bo->cpu;
-        src_w = sc->width;
-        src_h = sc->height;
-        color_bytes = (size_t)sc->width * sc->height * 4;
+    if (!color_cpu) {
+        if (last_cmd) {
+            color_cpu = v9_cmd_buffer_get_color_cpu(last_cmd);
+            src_w = v9_cmd_buffer_get_width(last_cmd);
+            src_h = v9_cmd_buffer_get_height(last_cmd);
+            color_bytes = v9_cmd_buffer_get_color_size(last_cmd);
+        }
+        if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
+            color_cpu = queue->device->last_rendered_color;
+            src_w = queue->device->last_rendered_w ? queue->device->last_rendered_w : (sc ? sc->width : 1280);
+            src_h = queue->device->last_rendered_h ? queue->device->last_rendered_h : (sc ? sc->height : 720);
+            color_bytes = (size_t)src_w * src_h * 4;
+        }
     }
 
     uint32_t sample0 = 0, sample_mid = 0;
