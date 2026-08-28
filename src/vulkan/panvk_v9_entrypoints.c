@@ -1027,7 +1027,7 @@ void vkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice physicalDev
 }
 
 VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCreateInfo *pCreateInfo, void *pAllocator, VkDevice *pDevice) {
-    panvk_trace("vkCreateDevice", NULL);
+    PANVK_LOG("vkCreateDevice called: phys=%p\n", physicalDevice);
     if (!physicalDevice || !pDevice) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct VkDevice_T *dev = calloc(1, sizeof(*dev));
@@ -1036,6 +1036,10 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
     set_loader_magic(dev);
     dev->phys_dev = physicalDevice;
     dev->kdev = physicalDevice->kdev;
+    if (!dev->kdev) {
+        PANVK_LOG("vkCreateDevice: physicalDevice->kdev was NULL, creating fallback kdev\n");
+        dev->kdev = pan_kmod_dev_create(NULL);
+    }
 
     dev->queue = calloc(1, sizeof(*dev->queue));
     if (dev->queue) {
@@ -1043,12 +1047,13 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
         dev->queue->device = dev;
     }
     *pDevice = dev;
-
+    PANVK_LOG("vkCreateDevice SUCCESS dev=%p kdev=%p queue=%p\n", dev, dev->kdev, dev->queue);
     return VK_SUCCESS;
 }
 
 void vkDestroyDevice(VkDevice device, void *pAllocator) {
     if (!device) return;
+    PANVK_LOG("vkDestroyDevice: dev=%p\n", device);
     if (device->queue) v9_cmd_buffer_destroy(device->queue->last_v9_cmd);
     free(device->queue);
     free(device);
@@ -3344,6 +3349,52 @@ void vkDebugReportMessageEXT(VkInstance instance, uint32_t flags, uint32_t objec
     (void)instance; (void)flags; (void)objectType; (void)object; (void)location; (void)messageCode; (void)pLayerPrefix; (void)pMessage;
 }
 
+VkResult vkMapMemory2KHR(VkDevice device, const void *pMemoryMapInfo, void **ppData) {
+    if (!pMemoryMapInfo || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
+    /* VkMemoryMapInfoKHR:
+     *   uint32_t sType
+     *   const void* pNext (offset 8)
+     *   uint32_t flags (offset 16)
+     *   VkDeviceMemory memory (offset 24)
+     *   VkDeviceSize offset (offset 32)
+     *   VkDeviceSize size (offset 40)
+     */
+    VkDeviceMemory memory = *(VkDeviceMemory *)((const uint8_t *)pMemoryMapInfo + 24);
+    VkDeviceSize offset = *(VkDeviceSize *)((const uint8_t *)pMemoryMapInfo + 32);
+    VkDeviceSize size = *(VkDeviceSize *)((const uint8_t *)pMemoryMapInfo + 40);
+    uint32_t flags = *(uint32_t *)((const uint8_t *)pMemoryMapInfo + 16);
+    return vkMapMemory(device, memory, offset, size, flags, ppData);
+}
+
+VkResult vkMapMemory2(VkDevice device, const void *pMemoryMapInfo, void **ppData) {
+    return vkMapMemory2KHR(device, pMemoryMapInfo, ppData);
+}
+
+VkResult vkUnmapMemory2KHR(VkDevice device, const void *pMemoryUnmapInfo) {
+    (void)device; (void)pMemoryUnmapInfo;
+    return VK_SUCCESS;
+}
+
+VkResult vkUnmapMemory2(VkDevice device, const void *pMemoryUnmapInfo) {
+    (void)device; (void)pMemoryUnmapInfo;
+    return VK_SUCCESS;
+}
+
+VkResult vkGetMemoryWin32HandleKHR(VkDevice device, const void *pGetWin32HandleInfo, void **pHandle) {
+    (void)device; (void)pGetWin32HandleInfo;
+    if (pHandle) *pHandle = (void *)0x1;
+    return VK_SUCCESS;
+}
+
+VkResult vkGetMemoryWin32HandlePropertiesKHR(VkDevice device, uint32_t handleType, void *handle, void *pMemoryWin32HandleProperties) {
+    (void)device; (void)handleType; (void)handle;
+    if (pMemoryWin32HandleProperties) {
+        struct { uint32_t sType; void *pNext; uint32_t memoryTypeBits; } *p = pMemoryWin32HandleProperties;
+        p->memoryTypeBits = 0x1;
+    }
+    return VK_SUCCESS;
+}
+
 /* Vulkan ICD Entry Point Lookup Table */
 __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
     if (!pName) return NULL;
@@ -3389,7 +3440,13 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkAllocateMemory);
     MATCH(vkFreeMemory);
     MATCH(vkMapMemory);
+    MATCH(vkMapMemory2);
+    MATCH(vkMapMemory2KHR);
     MATCH(vkUnmapMemory);
+    MATCH(vkUnmapMemory2);
+    MATCH(vkUnmapMemory2KHR);
+    MATCH(vkGetMemoryWin32HandleKHR);
+    MATCH(vkGetMemoryWin32HandlePropertiesKHR);
     MATCH(vkCreateBuffer);
     MATCH(vkDestroyBuffer);
     MATCH(vkGetBufferMemoryRequirements);
