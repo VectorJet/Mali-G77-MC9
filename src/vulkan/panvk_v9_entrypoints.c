@@ -1127,6 +1127,29 @@ void vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queue
     *pQueue = device->queue;
 }
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+static void *alloc_low32_memory(size_t aligned_sz) {
+    static uint64_t g_next_low_hint = 0x20000000ULL;
+
+    for (int attempts = 0; attempts < 64; attempts++) {
+        uint64_t hint = __sync_fetch_and_add(&g_next_low_hint, aligned_sz);
+        if (hint + aligned_sz > 0xE0000000ULL) {
+            g_next_low_hint = 0x20000000ULL;
+            hint = 0x20000000ULL;
+        }
+
+        void *p = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p != MAP_FAILED) {
+            return p;
+        }
+    }
+    return mmap(NULL, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+}
+
 /* Memory Allocation & Buffer Management */
 VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pAllocateInfo, void *pAllocator, VkDeviceMemory *pMemory) {
     if (!device || !pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
@@ -1151,19 +1174,8 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
 
-    /* Allocate 32-bit address space buffer (< 4GB) for 32-bit Wine/DXVK mapping without MAP_FIXED */
-    static uint64_t g_next_low_hint = 0x20000000ULL;
-    uint64_t hint = __sync_fetch_and_add(&g_next_low_hint, aligned_sz);
-    if (hint > 0x60000000ULL) {
-        g_next_low_hint = 0x20000000ULL;
-        hint = 0x20000000ULL;
-    }
-    mem->low_cpu = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (mem->low_cpu == MAP_FAILED || (uintptr_t)mem->low_cpu > 0xFFFFFFFFULL) {
-        if (mem->low_cpu != MAP_FAILED) munmap(mem->low_cpu, aligned_sz);
-        mem->low_cpu = mmap(NULL, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    }
-
+    /* Allocate guaranteed 32-bit address space buffer (< 4GB) for 32-bit Wine/DXVK mapping */
+    mem->low_cpu = alloc_low32_memory(aligned_sz);
     mem->size = aligned_sz;
 
     /* Add to device memory list */
