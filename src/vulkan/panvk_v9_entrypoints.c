@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <X11/Xlib.h>
 #include <xcb/xcb.h>
+#include <sys/mman.h>
 
 #include "panvk_v9_entrypoints.h"
 #include "panvk_v9_compiler.h"
@@ -47,11 +48,15 @@ struct VkPhysicalDevice_T {
     struct pan_kmod_dev_props props;
 };
 
+struct VkDeviceMemory_T;
+
 struct VkDevice_T {
     uintptr_t loader_data;
     struct pan_kmod_dev *kdev;
     struct VkPhysicalDevice_T *phys_dev;
     struct VkQueue_T *queue;
+    struct VkDeviceMemory_T *memories;
+    pthread_mutex_t mem_mutex;
 };
 
 struct VkQueue_T {
@@ -135,8 +140,9 @@ struct VkQueryPool_T {
 
 struct VkDeviceMemory_T {
     struct pan_kmod_bo *bo;
-    void *cpu;
+    void *low_cpu;
     VkDeviceSize size;
+    struct VkDeviceMemory_T *next;
 };
 
 struct VkBuffer_T {
@@ -1026,6 +1032,8 @@ void vkGetPhysicalDeviceSparseImageFormatProperties(VkPhysicalDevice physicalDev
     if (pPropertyCount) *pPropertyCount = 0;
 }
 
+static uint64_t g_next_low_hint = 0x20000000ULL;
+
 VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCreateInfo *pCreateInfo, void *pAllocator, VkDevice *pDevice) {
     PANVK_LOG("vkCreateDevice called: phys=%p\n", physicalDevice);
     if (!physicalDevice || !pDevice) return VK_ERROR_INITIALIZATION_FAILED;
@@ -1034,6 +1042,7 @@ VkResult vkCreateDevice(VkPhysicalDevice physicalDevice, const struct VkDeviceCr
     if (!dev) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     set_loader_magic(dev);
+    pthread_mutex_init(&dev->mem_mutex, NULL);
     dev->phys_dev = physicalDevice;
     dev->kdev = physicalDevice->kdev;
     if (!dev->kdev) {
@@ -1056,6 +1065,7 @@ void vkDestroyDevice(VkDevice device, void *pAllocator) {
     PANVK_LOG("vkDestroyDevice: dev=%p\n", device);
     if (device->queue) v9_cmd_buffer_destroy(device->queue->last_v9_cmd);
     free(device->queue);
+    pthread_mutex_destroy(&device->mem_mutex);
     free(device);
 }
 
@@ -1077,38 +1087,79 @@ void vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queue
     *pQueue = device->queue;
 }
 
-/* Memory Allocation & Buffer Management */
+/* Memory Allocation & Buffer Management (32-bit low VA shadow allocator) */
 VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pAllocateInfo, void *pAllocator, VkDeviceMemory *pMemory) {
-    if (!device || !device->kdev || !pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!device || !pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
 
     struct VkDeviceMemory_T *mem = calloc(1, sizeof(*mem));
     if (!mem) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
     size_t sz = pAllocateInfo->allocationSize > 0 ? pAllocateInfo->allocationSize : 4096;
-    mem->bo = pan_kmod_bo_alloc(device->kdev, sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
-    if (!mem->bo) {
-        free(mem);
-        PANVK_LOG("vkAllocateMemory FAILED: sz=%zu\n", sz);
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    size_t page_sz = 4096;
+    size_t aligned_sz = (sz + page_sz - 1) & ~(page_sz - 1);
+
+    if (device->kdev) {
+        mem->bo = pan_kmod_bo_alloc(device->kdev, aligned_sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
     }
-    mem->size = sz;
+    if (!mem->bo) {
+        if (!device->kdev) device->kdev = pan_kmod_dev_create(NULL);
+        if (device->kdev) mem->bo = pan_kmod_bo_alloc(device->kdev, aligned_sz, PAN_KMOD_BO_FLAG_READ | PAN_KMOD_BO_FLAG_WRITE);
+    }
+
+    /* Allocate low 32-bit virtual memory (< 4GB) for 32-bit Wine/DXVK mapping */
+    uint64_t hint = __sync_fetch_and_add(&g_next_low_hint, aligned_sz);
+    if (hint > 0x78000000ULL) {
+        g_next_low_hint = 0x20000000ULL;
+        hint = 0x20000000ULL;
+    }
+    mem->low_cpu = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem->low_cpu == MAP_FAILED) {
+        mem->low_cpu = mmap(NULL, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+    mem->size = aligned_sz;
+
+    /* Add to device memory list for synchronization */
+    pthread_mutex_lock(&device->mem_mutex);
+    mem->next = device->memories;
+    device->memories = mem;
+    pthread_mutex_unlock(&device->mem_mutex);
+
     *pMemory = mem;
-    PANVK_LOG("vkAllocateMemory OK: sz=%zu cpu=%p gpu=0x%llx mem=%p\n", sz, mem->bo->cpu, (unsigned long long)mem->bo->gpu, mem);
+    PANVK_LOG("vkAllocateMemory OK: sz=%zu low_cpu=%p bo_cpu=%p bo_gpu=0x%llx mem=%p\n",
+              sz, mem->low_cpu, mem->bo ? mem->bo->cpu : NULL,
+              mem->bo ? (unsigned long long)mem->bo->gpu : 0, mem);
     return VK_SUCCESS;
 }
 
 void vkFreeMemory(VkDevice device, VkDeviceMemory memory, void *pAllocator) {
     if (!memory) return;
     PANVK_LOG("vkFreeMemory: mem=%p\n", memory);
+    if (device) {
+        pthread_mutex_lock(&device->mem_mutex);
+        struct VkDeviceMemory_T **curr = &device->memories;
+        while (*curr) {
+            if (*curr == memory) {
+                *curr = memory->next;
+                break;
+            }
+            curr = &(*curr)->next;
+        }
+        pthread_mutex_unlock(&device->mem_mutex);
+    }
+    if (memory->low_cpu && memory->low_cpu != MAP_FAILED) {
+        munmap(memory->low_cpu, memory->size);
+    }
     if (memory->bo) pan_kmod_bo_free(memory->bo);
     free(memory);
 }
 
 VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkFlags flags, void **ppData) {
-    if (!memory || !memory->bo || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
-    *ppData = (uint8_t *)memory->bo->cpu + offset;
-    PANVK_LOG("vkMapMemory OK: mem=%p cpu=%p off=%llu sz=%llu -> *ppData=%p\n",
-              memory, memory->bo->cpu, (unsigned long long)offset, (unsigned long long)size, *ppData);
+    if (!memory || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
+    void *base = (memory->low_cpu && memory->low_cpu != MAP_FAILED) ? memory->low_cpu : (memory->bo ? memory->bo->cpu : NULL);
+    if (!base) return VK_ERROR_INITIALIZATION_FAILED;
+    *ppData = (uint8_t *)base + offset;
+    PANVK_LOG("vkMapMemory OK: mem=%p base=%p off=%llu sz=%llu -> *ppData=%p\n",
+              memory, base, (unsigned long long)offset, (unsigned long long)size, *ppData);
     return VK_SUCCESS;
 }
 
@@ -2370,6 +2421,17 @@ VkResult vkEndCommandBuffer(VkCommandBuffer commandBuffer) {
 VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmitInfo *pSubmits, void *fence) {
     if (!queue) return VK_ERROR_INITIALIZATION_FAILED;
 
+    /* Sync all active host memory allocations from low_cpu shadow buffers to GPU bo */
+    if (queue->device) {
+        pthread_mutex_lock(&queue->device->mem_mutex);
+        for (struct VkDeviceMemory_T *m = queue->device->memories; m; m = m->next) {
+            if (m->bo && m->bo->cpu && m->low_cpu && m->low_cpu != MAP_FAILED) {
+                memcpy(m->bo->cpu, m->low_cpu, m->size);
+            }
+        }
+        pthread_mutex_unlock(&queue->device->mem_mutex);
+    }
+
     if (pSubmits) {
         for (uint32_t s = 0; s < submitCount; s++) {
             for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
@@ -3054,10 +3116,29 @@ void vkCmdExecuteCommands(VkCommandBuffer cb, uint32_t commandBufferCount,
 }
 VkResult vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
                                          const void *pMemoryRanges) {
+    if (device) {
+        pthread_mutex_lock(&device->mem_mutex);
+        for (struct VkDeviceMemory_T *m = device->memories; m; m = m->next) {
+            if (m->bo && m->bo->cpu && m->low_cpu && m->low_cpu != MAP_FAILED) {
+                memcpy(m->low_cpu, m->bo->cpu, m->size);
+            }
+        }
+        pthread_mutex_unlock(&device->mem_mutex);
+    }
     return VK_SUCCESS;
 }
+
 VkResult vkFlushMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
                                     const void *pMemoryRanges) {
+    if (device) {
+        pthread_mutex_lock(&device->mem_mutex);
+        for (struct VkDeviceMemory_T *m = device->memories; m; m = m->next) {
+            if (m->bo && m->bo->cpu && m->low_cpu && m->low_cpu != MAP_FAILED) {
+                memcpy(m->bo->cpu, m->low_cpu, m->size);
+            }
+        }
+        pthread_mutex_unlock(&device->mem_mutex);
+    }
     return VK_SUCCESS;
 }
 VkResult vkCreateBufferView(VkDevice device, const void *pCreateInfo, void *pAllocator,
