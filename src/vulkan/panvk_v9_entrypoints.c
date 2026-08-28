@@ -161,6 +161,7 @@ struct VkQueryPool_T {
 
 struct VkDeviceMemory_T {
     struct pan_kmod_bo *bo;
+    void *low_cpu;
     VkDeviceSize size;
     struct VkDeviceMemory_T *next;
 };
@@ -1150,6 +1151,19 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
 
+    /* Allocate 32-bit address space buffer (< 4GB) for 32-bit Wine/DXVK mapping without MAP_FIXED */
+    static uint64_t g_next_low_hint = 0x20000000ULL;
+    uint64_t hint = __sync_fetch_and_add(&g_next_low_hint, aligned_sz);
+    if (hint > 0x60000000ULL) {
+        g_next_low_hint = 0x20000000ULL;
+        hint = 0x20000000ULL;
+    }
+    mem->low_cpu = mmap((void *)(uintptr_t)hint, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem->low_cpu == MAP_FAILED || (uintptr_t)mem->low_cpu > 0xFFFFFFFFULL) {
+        if (mem->low_cpu != MAP_FAILED) munmap(mem->low_cpu, aligned_sz);
+        mem->low_cpu = mmap(NULL, aligned_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+
     mem->size = aligned_sz;
 
     /* Add to device memory list */
@@ -1159,8 +1173,9 @@ VkResult vkAllocateMemory(VkDevice device, const struct VkMemoryAllocateInfo *pA
     pthread_mutex_unlock(&device->mem_mutex);
 
     *pMemory = mem;
-    PANVK_LOG("vkAllocateMemory OK: sz=%zu bo_cpu=%p bo_gpu=0x%llx mem=%p\n",
-              sz, mem->bo->cpu, (unsigned long long)mem->bo->gpu, mem);
+    PANVK_LOG("vkAllocateMemory OK: sz=%zu low_cpu=%p bo_cpu=%p bo_gpu=0x%llx mem=%p\n",
+              sz, mem->low_cpu, mem->bo ? mem->bo->cpu : NULL,
+              mem->bo ? (unsigned long long)mem->bo->gpu : 0, mem);
     return VK_SUCCESS;
 }
 
@@ -1179,15 +1194,21 @@ void vkFreeMemory(VkDevice device, VkDeviceMemory memory, void *pAllocator) {
         }
         pthread_mutex_unlock(&device->mem_mutex);
     }
+    if (memory->low_cpu && memory->low_cpu != MAP_FAILED) {
+        munmap(memory->low_cpu, memory->size);
+    }
     if (memory->bo) pan_kmod_bo_free(memory->bo);
     free(memory);
 }
 
 VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkFlags flags, void **ppData) {
-    if (!memory || !ppData || !memory->bo || !memory->bo->cpu) return VK_ERROR_INITIALIZATION_FAILED;
-    *ppData = (uint8_t *)memory->bo->cpu + offset;
+    if (!memory || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
+    void *base = (memory->low_cpu && memory->low_cpu != MAP_FAILED && (uintptr_t)memory->low_cpu <= 0xFFFFFFFFULL) ?
+                 memory->low_cpu : (memory->bo ? memory->bo->cpu : NULL);
+    if (!base) return VK_ERROR_INITIALIZATION_FAILED;
+    *ppData = (uint8_t *)base + offset;
     PANVK_LOG("vkMapMemory OK: mem=%p cpu=%p off=%llu sz=%llu -> *ppData=%p\n",
-              memory, memory->bo->cpu, (unsigned long long)offset, (unsigned long long)size, *ppData);
+              memory, base, (unsigned long long)offset, (unsigned long long)size, *ppData);
     return VK_SUCCESS;
 }
 
@@ -2470,6 +2491,16 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
     if (!queue) return VK_ERROR_INITIALIZATION_FAILED;
     PANVK_LOG("vkQueueSubmit: queue=%p submitCount=%u\n", (void*)queue, submitCount);
 
+    if (queue->device) {
+        pthread_mutex_lock(&queue->device->mem_mutex);
+        for (struct VkDeviceMemory_T *m = queue->device->memories; m; m = m->next) {
+            if (m->bo && m->bo->cpu && m->low_cpu && m->low_cpu != MAP_FAILED && m->size <= 4 * 1024 * 1024) {
+                memcpy(m->bo->cpu, m->low_cpu, m->size);
+            }
+        }
+        pthread_mutex_unlock(&queue->device->mem_mutex);
+    }
+
     if (pSubmits) {
         for (uint32_t s = 0; s < submitCount; s++) {
             for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
@@ -3149,13 +3180,57 @@ void vkCmdExecuteCommands(VkCommandBuffer cb, uint32_t commandBufferCount,
 }
 VkResult vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
                                          const void *pMemoryRanges) {
-    (void)device; (void)memoryRangeCount; (void)pMemoryRanges;
+    if (!pMemoryRanges) return VK_SUCCESS;
+    const struct {
+        uint32_t sType;
+        uint32_t _pad0;
+        const void *pNext;
+        VkDeviceMemory memory;
+        VkDeviceSize offset;
+        VkDeviceSize size;
+    } *ranges = pMemoryRanges;
+
+    for (uint32_t i = 0; i < memoryRangeCount; i++) {
+        VkDeviceMemory mem = ranges[i].memory;
+        if (mem && mem->bo && mem->bo->cpu && mem->low_cpu && mem->low_cpu != MAP_FAILED) {
+            VkDeviceSize offset = ranges[i].offset;
+            VkDeviceSize sz = ranges[i].size;
+            if (sz == ~0ULL || offset + sz > mem->size) {
+                sz = mem->size > offset ? mem->size - offset : 0;
+            }
+            if (sz > 0) {
+                memcpy((uint8_t *)mem->low_cpu + offset, (uint8_t *)mem->bo->cpu + offset, sz);
+            }
+        }
+    }
     return VK_SUCCESS;
 }
 
 VkResult vkFlushMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
                                     const void *pMemoryRanges) {
-    (void)device; (void)memoryRangeCount; (void)pMemoryRanges;
+    if (!pMemoryRanges) return VK_SUCCESS;
+    const struct {
+        uint32_t sType;
+        uint32_t _pad0;
+        const void *pNext;
+        VkDeviceMemory memory;
+        VkDeviceSize offset;
+        VkDeviceSize size;
+    } *ranges = pMemoryRanges;
+
+    for (uint32_t i = 0; i < memoryRangeCount; i++) {
+        VkDeviceMemory mem = ranges[i].memory;
+        if (mem && mem->bo && mem->bo->cpu && mem->low_cpu && mem->low_cpu != MAP_FAILED) {
+            VkDeviceSize offset = ranges[i].offset;
+            VkDeviceSize sz = ranges[i].size;
+            if (sz == ~0ULL || offset + sz > mem->size) {
+                sz = mem->size > offset ? mem->size - offset : 0;
+            }
+            if (sz > 0) {
+                memcpy((uint8_t *)mem->bo->cpu + offset, (uint8_t *)mem->low_cpu + offset, sz);
+            }
+        }
+    }
     return VK_SUCCESS;
 }
 VkResult vkCreateBufferView(VkDevice device, const void *pCreateInfo, void *pAllocator,
