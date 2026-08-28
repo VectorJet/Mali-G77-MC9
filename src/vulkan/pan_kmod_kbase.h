@@ -38,6 +38,15 @@ struct pan_kmod_dev_props {
     char ddk_version[64];
 };
 
+struct pan_kmod_atom {
+    uint64_t jc_gpu;
+    uint32_t core_req;
+    uint32_t atom_id;
+    uint32_t dep_atom_id[2];
+    uint32_t dep_type[2];
+    uint8_t jobslot;
+};
+
 /* Panfrost kmod API for kbase */
 struct pan_kmod_dev *pan_kmod_dev_create(const char *dev_node);
 void pan_kmod_dev_destroy(struct pan_kmod_dev *dev);
@@ -50,6 +59,11 @@ int pan_kmod_submit_atom(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t cor
                          uint32_t atom_id, uint32_t *event_code);
 int pan_kmod_submit_atom_timeout(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint32_t core_req,
                                  uint32_t atom_id, uint32_t *event_code, int timeout_ms);
+int pan_kmod_submit_atoms_chained(struct pan_kmod_dev *dev,
+                                 const struct pan_kmod_atom *atoms,
+                                 uint32_t nr_atoms,
+                                 uint32_t *final_event_code,
+                                 int timeout_ms);
 
 #ifdef __cplusplus
 }

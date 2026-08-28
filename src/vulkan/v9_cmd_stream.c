@@ -489,9 +489,12 @@ static void rasterize_3d_geometry(struct v9_cmd_buffer *cmd) {
         float r = base_r * diff;
         float g = base_g * diff;
         float b = base_b * diff;
-        if (r > 1.0f) r = 1.0f; if (r < 0.0f) r = 0.0f;
-        if (g > 1.0f) g = 1.0f; if (g < 0.0f) g = 0.0f;
-        if (b > 1.0f) b = 1.0f; if (b < 0.0f) b = 0.0f;
+        if (r > 1.0f) r = 1.0f;
+        if (r < 0.0f) r = 0.0f;
+        if (g > 1.0f) g = 1.0f;
+        if (g < 0.0f) g = 0.0f;
+        if (b > 1.0f) b = 1.0f;
+        if (b < 0.0f) b = 0.0f;
         uint8_t ur = (uint8_t)(r * 255.0f);
         uint8_t ug = (uint8_t)(g * 255.0f);
         uint8_t ub = (uint8_t)(b * 255.0f);
@@ -653,12 +656,86 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
     }
 
     uint32_t event_code = 0;
+    int ret = 0;
 
-    /* 1. Atom 0: TILER_JOB */
-    int ret = pan_kmod_submit_atom(cmd->dev, cmd->tiler_job_gpu, KBASE_QUEUE_REQ_TILER, 0, &event_code);
-    if (ret != 0 || event_code != 0x1) {
-        fprintf(stderr, "v9_cmd_buffer_submit: TILER_JOB failed (ret=%d, event_code=0x%x)\n", ret, event_code);
-        return -EIO;
+    /* Pre-pack Flush job and reset Tiler Heap bottom pointer */
+    v9_pack_flush_job((uint32_t *)(base_cpu + (cmd->flush_jc_gpu - cmd->mem_bo->gpu)));
+    uint32_t *th = (uint32_t *)(base_cpu + (cmd->tiler_heap_desc_gpu - cmd->mem_bo->gpu));
+    pack_u64(th + 4, cmd->tiler_heap_backing_gpu);
+
+    bool use_chain = (getenv("PANVK_NO_CHAIN") == NULL);
+    if (use_chain) {
+        /* Submit all 4 atoms (Tiler -> PreFlush -> Fragment -> PostFlush) in a single IOCTL */
+        struct pan_kmod_atom atoms[4] = {
+            {
+                .jc_gpu = cmd->tiler_job_gpu,
+                .core_req = KBASE_QUEUE_REQ_TILER,
+                .atom_id = 1,
+                .jobslot = 0,
+                .dep_atom_id = {0, 0},
+                .dep_type = {0, 0}
+            },
+            {
+                .jc_gpu = cmd->flush_jc_gpu,
+                .core_req = KBASE_QUEUE_REQ_FLUSH,
+                .atom_id = 2,
+                .jobslot = 1,
+                .dep_atom_id = {1, 0},
+                .dep_type = {0, 0}
+            },
+            {
+                .jc_gpu = cmd->frag_jc_gpu,
+                .core_req = KBASE_QUEUE_REQ_FRAGMENT,
+                .atom_id = 3,
+                .jobslot = 0,
+                .dep_atom_id = {2, 0},
+                .dep_type = {0, 0}
+            },
+            {
+                .jc_gpu = cmd->flush_jc_gpu,
+                .core_req = KBASE_QUEUE_REQ_FLUSH,
+                .atom_id = 4,
+                .jobslot = 1,
+                .dep_atom_id = {3, 0},
+                .dep_type = {0, 0}
+            }
+        };
+
+        ret = pan_kmod_submit_atoms_chained(cmd->dev, atoms, 4, &event_code, 250);
+        if (ret != 0 || event_code != 0x1) {
+            fprintf(stderr, "v9_cmd_buffer_submit: Chained multi-atom submission failed (ret=%d, event_code=0x%x)\n",
+                    ret, event_code);
+            return -EIO;
+        }
+    } else {
+        /* Fallback: 4 sequential ioctl submissions */
+        /* 1. Atom 0: TILER_JOB */
+        ret = pan_kmod_submit_atom(cmd->dev, cmd->tiler_job_gpu, KBASE_QUEUE_REQ_TILER, 0, &event_code);
+        if (ret != 0 || event_code != 0x1) {
+            fprintf(stderr, "v9_cmd_buffer_submit: TILER_JOB failed (ret=%d, event_code=0x%x)\n", ret, event_code);
+            return -EIO;
+        }
+
+        /* 2. Atom 1: Pre-Flush */
+        ret = pan_kmod_submit_atom(cmd->dev, cmd->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1, &event_code);
+        if (ret != 0 || event_code != 0x1) {
+            fprintf(stderr, "v9_cmd_buffer_submit: Pre-Flush failed (ret=%d, event_code=0x%x)\n", ret, event_code);
+            return -EIO;
+        }
+
+        /* 3. Atom 2: Fragment JC */
+        ret = pan_kmod_submit_atom_timeout(cmd->dev, cmd->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2, &event_code, 200);
+        if (ret < 0 || event_code != 0x1) {
+            fprintf(stderr, "v9_cmd_buffer_submit: Fragment JC failed (ret=%d, event_code=0x%x)\n", ret, event_code);
+            return ret;
+        }
+
+        /* 4. Atom 3: Post-Flush */
+        ret = pan_kmod_submit_atom(cmd->dev, cmd->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1, &event_code);
+        if (ret != 0 || event_code != 0x1) {
+            fprintf(stderr, "v9_cmd_buffer_submit: Post-Flush failed (ret=%d, event_code=0x%x)\n", ret, event_code);
+            return -EIO;
+        }
     }
 
     if (getenv("PANVK_DUMP_TILER")) {
@@ -677,7 +754,6 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
         fprintf(stderr, "SP_FRAG: %08x %08x %08x %08x (isa=0x%llx)\n",
                 sp_f[0], sp_f[1], sp_f[2], sp_f[3], (unsigned long long)*(uint64_t *)(sp_f + 2));
         uint32_t *res_v = (uint32_t *)(cpu + (cmd->res_gpu - cmd->mem_bo->gpu));
-        uint32_t *res_f = (uint32_t *)(cpu + (cmd->res_frag_gpu - cmd->mem_bo->gpu));
         fprintf(stderr, "RES_VERT: T0(ubo)=0x%llx T1(attr)=0x%llx T2(buf)=0x%llx\n",
                 (unsigned long long)*(uint64_t *)(res_v + 2),
                 (unsigned long long)*(uint64_t *)(res_v + 6),
@@ -698,49 +774,6 @@ int v9_cmd_buffer_submit(struct v9_cmd_buffer *cmd) {
         }
         fprintf(stderr, "TILER OUTPUT: active_tiles=%u / %zu, first_poly=0x%llx\n",
                 active_tiles, total_tiles, (unsigned long long)polylist[0]);
-    }
-
-    if (getenv("PANVK_PATCH_TILER_STATE")) {
-        uint32_t *ctx = (uint32_t *)((uint8_t *)cmd->mem_bo->cpu +
-                                     (cmd->tiler_ctx_gpu - cmd->mem_bo->gpu));
-        ctx[33] = 31;
-        ctx[35] = 0x10000000u;
-    }
-
-    /* 2. Atom 1: Pre-Flush */
-    v9_pack_flush_job((uint32_t *)(base_cpu + (cmd->flush_jc_gpu - cmd->mem_bo->gpu)));
-    ret = pan_kmod_submit_atom(cmd->dev, cmd->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1, &event_code);
-    if (ret != 0 || event_code != 0x1) {
-        fprintf(stderr, "v9_cmd_buffer_submit: Pre-Flush failed (ret=%d, event_code=0x%x)\n", ret, event_code);
-        return -EIO;
-    }
-
-    /* Reset Tiler Heap Desc bottom pointer back to heap base for Fragment HW */
-    uint32_t *th = (uint32_t *)(base_cpu + (cmd->tiler_heap_desc_gpu - cmd->mem_bo->gpu));
-    pack_u64(th + 4, cmd->tiler_heap_backing_gpu);
-
-    /* 3. Atom 2: Fragment JC (hardware chain Job 1 -> Job 2) */
-    ret = pan_kmod_submit_atom_timeout(cmd->dev, cmd->frag_jc_gpu, KBASE_QUEUE_REQ_FRAGMENT, 2, &event_code, 200);
-    if (getenv("PANVK_DUMP_TILER")) {
-        fprintf(stderr, "FRAG_ATOM: ret=%d event_code=0x%x\n", ret, event_code);
-    }
-    if (ret < 0 || event_code != 0x1) {
-        fprintf(stderr, "v9_cmd_buffer_submit: Fragment JC submission failed (ret=%d, event_code=0x%x)\n", ret, event_code);
-        uint32_t *fj1 = (uint32_t *)(base_cpu + (cmd->frag_jc_gpu - cmd->mem_bo->gpu));
-        uint32_t *fj2 = (uint32_t *)(base_cpu + (cmd->frag_jc2_gpu - cmd->mem_bo->gpu));
-        fprintf(stderr, "FJ1 status: 0x%08x 0x%08x 0x%08x 0x%08x fault_ptr=0x%llx\n",
-                fj1[0], fj1[1], fj1[2], fj1[3], (unsigned long long)*(uint64_t *)(fj1 + 2));
-        fprintf(stderr, "FJ2 status: 0x%08x 0x%08x 0x%08x 0x%08x fault_ptr=0x%llx\n",
-                fj2[0], fj2[1], fj2[2], fj2[3], (unsigned long long)*(uint64_t *)(fj2 + 2));
-        return ret;
-    }
-
-    /* 4. Atom 3: Post-Flush (flushes L2 cache and signals completion) */
-    v9_pack_flush_job((uint32_t *)(base_cpu + (cmd->flush_jc_gpu - cmd->mem_bo->gpu)));
-    ret = pan_kmod_submit_atom(cmd->dev, cmd->flush_jc_gpu, KBASE_QUEUE_REQ_FLUSH, 1, &event_code);
-    if (ret != 0 || event_code != 0x1) {
-        fprintf(stderr, "v9_cmd_buffer_submit: Post-Flush submission failed (ret=%d, event_code=0x%x)\n", ret, event_code);
-        return -EIO;
     }
 
     rasterize_3d_geometry(cmd);

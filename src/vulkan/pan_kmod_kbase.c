@@ -121,3 +121,48 @@ int pan_kmod_submit_atom_timeout(struct pan_kmod_dev *dev, uint64_t jc_gpu, uint
     if (ret == -EAGAIN) return 0; /* Timeout hit, job still queued/executing */
     return (ret == 0 && rx_code == 0x1) ? 0 : -EIO;
 }
+
+int pan_kmod_submit_atoms_chained(struct pan_kmod_dev *dev,
+                                 const struct pan_kmod_atom *atoms,
+                                 uint32_t nr_atoms,
+                                 uint32_t *final_event_code,
+                                 int timeout_ms) {
+    if (!dev || !dev->kdev || !atoms || nr_atoms == 0) return -EINVAL;
+
+    struct kbase_atom_submit_info *k_info = calloc(nr_atoms, sizeof(struct kbase_atom_submit_info));
+    if (!k_info) return -ENOMEM;
+
+    for (uint32_t i = 0; i < nr_atoms; i++) {
+        k_info[i].jc = atoms[i].jc_gpu;
+        k_info[i].core_req = atoms[i].core_req;
+        k_info[i].atom_number = atoms[i].atom_id;
+        k_info[i].jobslot = atoms[i].jobslot;
+        k_info[i].dep_atom_id[0] = (uint8_t)atoms[i].dep_atom_id[0];
+        k_info[i].dep_type[0]    = (uint8_t)atoms[i].dep_type[0];
+        k_info[i].dep_atom_id[1] = (uint8_t)atoms[i].dep_atom_id[1];
+        k_info[i].dep_type[1]    = (uint8_t)atoms[i].dep_type[1];
+    }
+
+    int ret = kbase_submit_atoms(dev->kdev, k_info, nr_atoms);
+    free(k_info);
+    if (ret < 0) return ret;
+
+    /* Drain completion events for all submitted atoms */
+    uint32_t last_code = 0;
+    int overall_status = 0;
+    for (uint32_t i = 0; i < nr_atoms; i++) {
+        uint32_t rx_atom = 0, rx_code = 0;
+        int ev_ret;
+        if (timeout_ms < 0) {
+            ev_ret = kbase_wait_event(dev->kdev, &rx_atom, &rx_code);
+        } else {
+            ev_ret = kbase_wait_event_timeout(dev->kdev, &rx_atom, &rx_code, timeout_ms);
+        }
+        if (ev_ret < 0 && overall_status == 0) overall_status = ev_ret;
+        if (rx_code != 0x1 && overall_status == 0) overall_status = -EIO;
+        last_code = rx_code;
+    }
+
+    if (final_event_code) *final_event_code = last_code;
+    return overall_status;
+}

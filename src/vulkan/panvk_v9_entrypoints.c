@@ -208,6 +208,7 @@ struct panvk_compiler_api {
     bool attempted;
 };
 
+#if defined(__BIONIC__) || defined(ANDROID)
 /* GLIBC compatibility globals and functions for Bionic */
 char *program_invocation_name = (char *)"vkmark";
 char *program_invocation_short_name = (char *)"vkmark";
@@ -216,6 +217,7 @@ extern int *__errno(void);
 int *__errno_location(void) {
     return __errno();
 }
+#endif
 
 static struct panvk_compiler_api compiler_api;
 static pthread_mutex_t compiler_api_mutex = PTHREAD_MUTEX_INITIALIZER;

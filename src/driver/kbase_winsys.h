@@ -63,8 +63,19 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
 struct kbase_bo *kbase_bo_import_dma_buf(struct kbase_dev *dev, int dma_buf_fd, size_t size);
 void kbase_bo_free(struct kbase_bo *bo);
 
+struct kbase_atom_submit_info {
+    uint64_t jc;
+    uint32_t core_req;
+    uint32_t atom_number;
+    uint8_t jobslot;
+    uint8_t dep_atom_id[2];
+    uint8_t dep_type[2];
+    uint32_t frame_nr;
+};
+
 int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint32_t atom_nr,
                       uint8_t jobslot, uint32_t frame_nr);
+int kbase_submit_atoms(struct kbase_dev *dev, const struct kbase_atom_submit_info *atoms, uint32_t nr_atoms);
 int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_code);
 int kbase_wait_event_timeout(struct kbase_dev *dev, uint32_t *atom_nr,
                              uint32_t *event_code, int timeout_ms);

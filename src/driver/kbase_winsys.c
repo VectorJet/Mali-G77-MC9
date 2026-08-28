@@ -263,6 +263,44 @@ int kbase_submit_job(struct kbase_dev *dev, uint64_t jc, uint32_t core_req, uint
     return 0;
 }
 
+int kbase_submit_atoms(struct kbase_dev *dev, const struct kbase_atom_submit_info *atoms, uint32_t nr_atoms) {
+    if (!dev || !atoms || nr_atoms == 0) return -EINVAL;
+
+    struct kbase_atom_mtk *k_atoms = calloc(nr_atoms, sizeof(struct kbase_atom_mtk));
+    if (!k_atoms) return -ENOMEM;
+
+    for (uint32_t i = 0; i < nr_atoms; i++) {
+        k_atoms[i].jc = atoms[i].jc;
+        k_atoms[i].atom_number = (uint8_t)atoms[i].atom_number;
+        k_atoms[i].core_req = atoms[i].core_req;
+        k_atoms[i].jobslot = atoms[i].jobslot;
+        k_atoms[i].frame_nr = atoms[i].frame_nr;
+        if (atoms[i].dep_atom_id[0]) {
+            k_atoms[i].pre_dep[0].atom_id = atoms[i].dep_atom_id[0];
+            k_atoms[i].pre_dep[0].dep_type = atoms[i].dep_type[0];
+        }
+        if (atoms[i].dep_atom_id[1]) {
+            k_atoms[i].pre_dep[1].atom_id = atoms[i].dep_atom_id[1];
+            k_atoms[i].pre_dep[1].dep_type = atoms[i].dep_type[1];
+        }
+    }
+
+    struct kbase_ioctl_job_submit submit = {
+        .addr = (uint64_t)(uintptr_t)k_atoms,
+        .nr_atoms = nr_atoms,
+        .stride = sizeof(struct kbase_atom_mtk)
+    };
+
+    int ret = 0;
+    if (ioctl(dev->fd, KBASE_IOCTL_JOB_SUBMIT, &submit) < 0) {
+        perror("kbase_submit_atoms: KBASE_IOCTL_JOB_SUBMIT");
+        ret = -errno;
+    }
+
+    free(k_atoms);
+    return ret;
+}
+
 int kbase_wait_event(struct kbase_dev *dev, uint32_t *atom_nr, uint32_t *event_code) {
     if (!dev) return -EINVAL;
 
