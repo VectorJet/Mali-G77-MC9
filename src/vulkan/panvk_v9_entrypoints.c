@@ -940,17 +940,42 @@ void vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, void *
     if (!pMemoryProperties) return;
     struct VkPhysicalDeviceMemoryProperties *mp = (struct VkPhysicalDeviceMemoryProperties *)pMemoryProperties;
     memset(mp, 0, sizeof(*mp));
-    mp->memoryTypeCount = 1;
-    mp->memoryTypes[0].propertyFlags = 0xF; /* DeviceLocal | HostVisible | HostCoherent | HostCached */
+    mp->memoryTypeCount = 2;
+    /* Type 0: Device Local (GPU-only) */
+    mp->memoryTypes[0].propertyFlags = 1; /* VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT */
     mp->memoryTypes[0].heapIndex = 0;
+    /* Type 1: Unified Memory (Host Visible + Coherent + Cached + Device Local) */
+    mp->memoryTypes[1].propertyFlags = 0xF; /* DeviceLocal | HostVisible | HostCoherent | HostCached */
+    mp->memoryTypes[1].heapIndex = 0;
     mp->memoryHeapCount = 1;
-    mp->memoryHeaps[0].size = 4096ULL * 1024ULL * 1024ULL; /* 4GB Heap Size */
+    mp->memoryHeaps[0].size = 256ULL * 1024ULL * 1024ULL; /* 256MB Heap for 32-bit Wine chunk compatibility */
     mp->memoryHeaps[0].flags = 1; /* Heap flags: DeviceLocal */
 }
 
 void vkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice, struct VkPhysicalDeviceMemoryProperties2 *pMemoryProperties) {
     if (!pMemoryProperties) return;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &pMemoryProperties->memoryProperties);
+
+    struct VkBaseOutStructure {
+        uint32_t sType;
+        struct VkBaseOutStructure *pNext;
+    } *curr = (struct VkBaseOutStructure *)pMemoryProperties->pNext;
+
+    while (curr) {
+        if (curr->sType == 1000237000) { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                VkDeviceSize heapBudget[16];
+                VkDeviceSize heapUsage[16];
+            } *mb = (void *)curr;
+            memset(mb->heapBudget, 0, sizeof(mb->heapBudget));
+            memset(mb->heapUsage, 0, sizeof(mb->heapUsage));
+            mb->heapBudget[0] = 256ULL * 1024ULL * 1024ULL;
+            mb->heapUsage[0] = 0;
+        }
+        curr = curr->pNext;
+    }
 }
 
 void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice physicalDevice, uint32_t format, void *pFormatProperties) {
@@ -1186,7 +1211,7 @@ void vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, struct VkMe
     if (!pMemoryRequirements) return;
     pMemoryRequirements->size = buffer ? buffer->size : 4096;
     pMemoryRequirements->alignment = 64;
-    pMemoryRequirements->memoryTypeBits = 0x1;
+    pMemoryRequirements->memoryTypeBits = 0x3;
 }
 
 VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset) {
@@ -1218,7 +1243,7 @@ void vkGetImageMemoryRequirements(VkDevice device, VkImage image,
     VkDeviceSize size = image ? (VkDeviceSize)image->width * image->height * 4 : 4096;
     pMemoryRequirements->size = size > 0 ? size : 4096;
     pMemoryRequirements->alignment = 64;
-    pMemoryRequirements->memoryTypeBits = 1;
+    pMemoryRequirements->memoryTypeBits = 0x3;
 }
 
 VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory,
