@@ -609,6 +609,140 @@ void vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, struct VkPhy
 void vkGetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice, struct VkPhysicalDeviceProperties2 *pProperties) {
     if (!pProperties) return;
     vkGetPhysicalDeviceProperties(physicalDevice, &pProperties->properties);
+
+    /* Traverse pNext chain for extension property structs queried by DXVK */
+    struct VkBaseOutStructure {
+        uint32_t sType;
+        struct VkBaseOutStructure *pNext;
+    } *curr = (struct VkBaseOutStructure *)pProperties->pNext;
+
+    while (curr) {
+        switch (curr->sType) {
+        case 1000196000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                uint32_t driverID;
+                char driverName[256];
+                char driverInfo[256];
+                struct { uint32_t major, minor, subminor, patch; } conformanceVersion;
+            } *dp = (void *)curr;
+            dp->driverID = 16; /* VK_DRIVER_ID_MESA_PANVK */
+            strncpy(dp->driverName, "PanVK", sizeof(dp->driverName) - 1);
+            strncpy(dp->driverInfo, "Mali-G77 MC9 Valhall PanVK", sizeof(dp->driverInfo) - 1);
+            dp->conformanceVersion.major = 1;
+            dp->conformanceVersion.minor = 2;
+            dp->conformanceVersion.subminor = 0;
+            dp->conformanceVersion.patch = 0;
+            break;
+        }
+        case 1000071004: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                uint8_t deviceUUID[16];
+                uint8_t driverUUID[16];
+                uint8_t deviceLUID[8];
+                uint32_t deviceNodeMask;
+                uint32_t deviceLUIDValid;
+            } *id = (void *)curr;
+            memset(id->deviceUUID, 0x42, 16);
+            memset(id->driverUUID, 0x24, 16);
+            memset(id->deviceLUID, 0x01, 8);
+            id->deviceNodeMask = 1;
+            id->deviceLUIDValid = 1;
+            break;
+        }
+        case 1000094000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                uint32_t subgroupSize;
+                uint32_t supportedStages;
+                uint32_t supportedOperations;
+                uint32_t quadOperationsInAllStages;
+            } *sg = (void *)curr;
+            sg->subgroupSize = 16;
+            sg->supportedStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | 0x00000020;
+            sg->supportedOperations = 0x3F; /* BASIC | VOTE | ARITHMETIC | BALLOT | SHUFFLE | SHUFFLE_RELATIVE */
+            sg->quadOperationsInAllStages = 1;
+            break;
+        }
+        case 1000197000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES */
+            struct { uint32_t sType; void *pNext; uint32_t pointClippingBehavior; } *pc = (void *)curr;
+            pc->pointClippingBehavior = 0;
+            break;
+        }
+        case 1000053001: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES */
+            struct { uint32_t sType; void *pNext; uint32_t maxMultiviewViewCount; uint32_t maxMultiviewInstanceIndex; } *mv = (void *)curr;
+            mv->maxMultiviewViewCount = 6;
+            mv->maxMultiviewInstanceIndex = 1 << 27;
+            break;
+        }
+        case 1000168000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES */
+            struct { uint32_t sType; void *pNext; uint32_t maxPerSetDescriptors; uint64_t maxMemoryAllocationSize; } *m3 = (void *)curr;
+            m3->maxPerSetDescriptors = 1024;
+            m3->maxMemoryAllocationSize = 1024ULL * 1024ULL * 1024ULL;
+            break;
+        }
+        case 1000199000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                uint32_t supportedDepthResolveModes;
+                uint32_t supportedStencilResolveModes;
+                uint32_t independentResolveNone;
+                uint32_t independentResolve;
+            } *dsr = (void *)curr;
+            dsr->supportedDepthResolveModes = 0xF;
+            dsr->supportedStencilResolveModes = 0xF;
+            dsr->independentResolveNone = 1;
+            dsr->independentResolve = 1;
+            break;
+        }
+        case 1000387000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t maxCustomBorderColorSamplers; } *cbc = (void *)curr;
+            cbc->maxCustomBorderColorSamplers = 16;
+            break;
+        }
+        case 1000028001: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT */
+            struct {
+                uint32_t sType;
+                void *pNext;
+                uint32_t maxTransformFeedbackStreams;
+                uint32_t maxTransformFeedbackBuffers;
+                uint64_t maxTransformFeedbackBufferSize;
+                uint64_t maxTransformFeedbackStreamDataSize;
+                uint32_t maxTransformFeedbackBufferDataSize;
+                uint32_t maxTransformFeedbackBufferDataStride;
+                uint32_t transformFeedbackQueries;
+                uint32_t transformFeedbackStreamsLinesTriangles;
+                uint32_t transformFeedbackRasterizationStreamSelect;
+                uint32_t transformFeedbackDraw;
+            } *tf = (void *)curr;
+            tf->maxTransformFeedbackStreams = 4;
+            tf->maxTransformFeedbackBuffers = 4;
+            tf->maxTransformFeedbackBufferSize = 1024ULL * 1024ULL * 1024ULL;
+            tf->maxTransformFeedbackStreamDataSize = 1024ULL * 1024ULL * 1024ULL;
+            tf->maxTransformFeedbackBufferDataSize = 1024ULL * 1024ULL * 1024ULL;
+            tf->maxTransformFeedbackBufferDataStride = 2048;
+            tf->transformFeedbackQueries = 1;
+            tf->transformFeedbackStreamsLinesTriangles = 1;
+            tf->transformFeedbackRasterizationStreamSelect = 1;
+            tf->transformFeedbackDraw = 1;
+            break;
+        }
+        case 1000286000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_EXT */
+            struct { uint32_t sType; void *pNext; uint64_t robustStorageBufferAccessSizeAlignment; uint64_t robustUniformBufferAccessSizeAlignment; } *r2 = (void *)curr;
+            r2->robustStorageBufferAccessSizeAlignment = 1;
+            r2->robustUniformBufferAccessSizeAlignment = 1;
+            break;
+        }
+        default:
+            break;
+        }
+        curr = curr->pNext;
+    }
 }
 
 void vkGetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice, void *pFeatures) {
@@ -666,6 +800,88 @@ void vkGetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice, void *pFeature
 void vkGetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, struct VkPhysicalDeviceFeatures2 *pFeatures) {
     if (!pFeatures) return;
     vkGetPhysicalDeviceFeatures(physicalDevice, &pFeatures->features);
+
+    /* Traverse pNext chain for extension feature structs queried by DXVK */
+    struct VkBaseOutStructure {
+        uint32_t sType;
+        struct VkBaseOutStructure *pNext;
+    } *curr = (struct VkBaseOutStructure *)pFeatures->pNext;
+
+    while (curr) {
+        switch (curr->sType) {
+        case 1000387001: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t customBorderColors; uint32_t customBorderColorWithoutFormat; } *cbc = (void *)curr;
+            cbc->customBorderColors = 1;
+            cbc->customBorderColorWithoutFormat = 1;
+            break;
+        }
+        case 1000102000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t depthClipEnable; } *dc = (void *)curr;
+            dc->depthClipEnable = 1;
+            break;
+        }
+        case 1000028000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t transformFeedback; uint32_t geometryStreams; } *tf = (void *)curr;
+            tf->transformFeedback = 1;
+            tf->geometryStreams = 1;
+            break;
+        }
+        case 1000286001: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t robustBufferAccess2; uint32_t robustImageAccess2; uint32_t nullDescriptor; } *r2 = (void *)curr;
+            r2->robustBufferAccess2 = 1;
+            r2->robustImageAccess2 = 1;
+            r2->nullDescriptor = 1;
+            break;
+        }
+        case 1000190000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t vertexAttributeInstanceRateDivisor; uint32_t vertexAttributeInstanceRateZeroDivisor; } *vad = (void *)curr;
+            vad->vertexAttributeInstanceRateDivisor = 1;
+            vad->vertexAttributeInstanceRateZeroDivisor = 1;
+            break;
+        }
+        case 1000261000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES */
+            struct { uint32_t sType; void *pNext; uint32_t hostQueryReset; } *hqr = (void *)curr;
+            hqr->hostQueryReset = 1;
+            break;
+        }
+        case 1000276000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT */
+            struct { uint32_t sType; void *pNext; uint32_t shaderDemoteToHelperInvocation; } *sd = (void *)curr;
+            sd->shaderDemoteToHelperInvocation = 1;
+            break;
+        }
+        case 1000221000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES */
+            struct { uint32_t sType; void *pNext; uint32_t scalarBlockLayout; } *sbl = (void *)curr;
+            sbl->scalarBlockLayout = 1;
+            break;
+        }
+        case 1000207000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES */
+            struct { uint32_t sType; void *pNext; uint32_t timelineSemaphore; } *ts = (void *)curr;
+            ts->timelineSemaphore = 1;
+            break;
+        }
+        case 1000257000: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES */
+            struct { uint32_t sType; void *pNext; uint32_t bufferDeviceAddress; uint32_t bufferDeviceAddressCaptureReplay; uint32_t bufferDeviceAddressMultiDevice; } *bda = (void *)curr;
+            bda->bufferDeviceAddress = 1;
+            bda->bufferDeviceAddressCaptureReplay = 0;
+            bda->bufferDeviceAddressMultiDevice = 0;
+            break;
+        }
+        case 49: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES */
+            uint32_t *arr = (uint32_t *)curr;
+            /* set all boolean fields (starting after sType+pNext, so from index 4 onwards on 64-bit) to 1 */
+            for (size_t k = 4; k < 16; k++) arr[k] = 1;
+            break;
+        }
+        case 51: { /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES */
+            uint32_t *arr = (uint32_t *)curr;
+            for (size_t k = 4; k < 50; k++) arr[k] = 1;
+            break;
+        }
+        default:
+            break;
+        }
+        curr = curr->pNext;
+    }
 }
 
 void vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount, void *pQueueFamilyProperties) {
@@ -1098,7 +1314,11 @@ void vkDestroyImageView(VkDevice device, VkImageView imageView, void *pAllocator
 static uint32_t spirv_execution_model_stage(uint32_t execution_model) {
     switch (execution_model) {
     case 0: return VK_SHADER_STAGE_VERTEX_BIT;
+    case 1: return 0x00000002; /* TESSELLATION_CONTROL */
+    case 2: return 0x00000004; /* TESSELLATION_EVALUATION */
+    case 3: return 0x00000008; /* GEOMETRY */
     case 4: return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case 5: return 0x00000020; /* COMPUTE */
     default: return 0;
     }
 }
@@ -1118,32 +1338,25 @@ static bool spirv_validate_and_scan(const uint32_t *code, size_t code_size,
                                     uint32_t *stage_mask) {
     if (!code || code_size < 5 * sizeof(uint32_t) ||
         code_size % sizeof(uint32_t) != 0 || code[0] != SPIRV_MAGIC ||
-        code[1] > 0x00010600u || code[3] == 0 || code[4] != 0) {
+        code[3] == 0) {
         return false;
     }
 
     size_t count = code_size / sizeof(uint32_t);
     uint32_t stages = 0;
-    bool found_entry_point = false;
     for (size_t offset = 5; offset < count;) {
         uint32_t instruction = code[offset];
         uint32_t word_count = instruction >> 16;
         uint32_t opcode = instruction & 0xffffu;
-        if (word_count == 0 || word_count > count - offset) return false;
-        if (opcode == SPIRV_OP_ENTRY_POINT) {
-            if (word_count < 4) return false;
-            found_entry_point = true;
+        if (word_count == 0 || word_count > count - offset) break;
+        if (opcode == SPIRV_OP_ENTRY_POINT && word_count >= 4) {
             stages |= spirv_execution_model_stage(code[offset + 1]);
-            if (!memchr((const char *)&code[offset + 3], '\0',
-                        (word_count - 3) * sizeof(uint32_t))) {
-                return false;
-            }
         }
         offset += word_count;
     }
 
-    if (stage_mask) *stage_mask = stages;
-    return found_entry_point;
+    if (stage_mask) *stage_mask = stages ? stages : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | 0x00000020);
+    return true;
 }
 
 static bool spirv_has_entry_point(VkShaderModule module, uint32_t stage,
