@@ -37,7 +37,7 @@ static uint32_t *read_spirv(const char *path, size_t *size) {
 int main(int argc, char **argv) {
     printf("=== Testing Step 4: Vulkan Loader ICD Shared Library Integration ===\n");
 
-    const char *so_path = "./libvulkan_panvk_v9.so";
+    const char *so_path = (argc > 1) ? argv[1] : "./libvulkan_panvk_v9.so";
     void *handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "FAIL: dlopen('%s') failed: %s\n", so_path, dlerror());

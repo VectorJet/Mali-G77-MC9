@@ -128,8 +128,6 @@ void kbase_dev_close(struct kbase_dev *dev) {
     free(dev);
 }
 
-static uint64_t next_hint_va = 0x20000000ULL; /* Start at 512MB in low 32-bit space */
-
 struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t flags) {
     if (!dev || size == 0) return NULL;
 
