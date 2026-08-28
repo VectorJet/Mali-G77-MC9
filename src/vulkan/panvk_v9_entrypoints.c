@@ -2239,22 +2239,72 @@ void vkDestroySampler(VkDevice device, VkSampler sampler, void *pAllocator) {
 
 void vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage,
                             uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions) {
-    (void)commandBuffer; (void)srcBuffer; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+    (void)commandBuffer; (void)dstImageLayout;
+    if (!srcBuffer || !srcBuffer->bo || !dstImage || !dstImage->bo || !pRegions) return;
+    struct VkBufferImageCopy {
+        VkDeviceSize bufferOffset;
+        uint32_t bufferRowLength;
+        uint32_t bufferImageHeight;
+        uint32_t aspectMask, mipLevel, baseArrayLayer, layerCount;
+        int32_t x, y, z;
+        uint32_t width, height, depth;
+    };
+    const struct VkBufferImageCopy *copies = (const struct VkBufferImageCopy *)pRegions;
+    for (uint32_t i = 0; i < regionCount; i++) {
+        const struct VkBufferImageCopy *c = &copies[i];
+        size_t src_off = srcBuffer->memory_offset + c->bufferOffset;
+        size_t dst_off = dstImage->memory_offset;
+        size_t copy_bytes = (size_t)c->width * c->height * 4;
+        if (copy_bytes == 0) copy_bytes = (size_t)dstImage->width * dstImage->height * 4;
+        if (src_off + copy_bytes <= srcBuffer->bo->size && dst_off + copy_bytes <= dstImage->bo->size) {
+            memcpy((uint8_t *)dstImage->bo->cpu + dst_off,
+                   (const uint8_t *)srcBuffer->bo->cpu + src_off,
+                   copy_bytes);
+        }
+    }
 }
 
 void vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
                             VkBuffer dstBuffer, uint32_t regionCount, const void *pRegions) {
-    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstBuffer; (void)regionCount; (void)pRegions;
+    (void)commandBuffer; (void)srcImageLayout;
+    if (!srcImage || !srcImage->bo || !dstBuffer || !dstBuffer->bo || !pRegions) return;
+    struct VkBufferImageCopy {
+        VkDeviceSize bufferOffset;
+        uint32_t bufferRowLength;
+        uint32_t bufferImageHeight;
+        uint32_t aspectMask, mipLevel, baseArrayLayer, layerCount;
+        int32_t x, y, z;
+        uint32_t width, height, depth;
+    };
+    const struct VkBufferImageCopy *copies = (const struct VkBufferImageCopy *)pRegions;
+    for (uint32_t i = 0; i < regionCount; i++) {
+        const struct VkBufferImageCopy *c = &copies[i];
+        size_t src_off = srcImage->memory_offset;
+        size_t dst_off = dstBuffer->memory_offset + c->bufferOffset;
+        size_t copy_bytes = (size_t)c->width * c->height * 4;
+        if (copy_bytes == 0) copy_bytes = (size_t)srcImage->width * srcImage->height * 4;
+        if (src_off + copy_bytes <= srcImage->bo->size && dst_off + copy_bytes <= dstBuffer->bo->size) {
+            memcpy((uint8_t *)dstBuffer->bo->cpu + dst_off,
+                   (const uint8_t *)srcImage->bo->cpu + src_off,
+                   copy_bytes);
+        }
+    }
 }
 
 void vkCmdCopyImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
                     VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions) {
-    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+    (void)commandBuffer; (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+    if (!srcImage || !srcImage->bo || !dstImage || !dstImage->bo) return;
+    size_t sz = srcImage->bo->size < dstImage->bo->size ? srcImage->bo->size : dstImage->bo->size;
+    memcpy(dstImage->bo->cpu, srcImage->bo->cpu, sz);
 }
 
 void vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
                     VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount, const void *pRegions, uint32_t filter) {
-    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions; (void)filter;
+    (void)commandBuffer; (void)srcImageLayout; (void)dstImageLayout; (void)regionCount; (void)pRegions; (void)filter;
+    if (!srcImage || !srcImage->bo || !dstImage || !dstImage->bo) return;
+    size_t sz = srcImage->bo->size < dstImage->bo->size ? srcImage->bo->size : dstImage->bo->size;
+    memcpy(dstImage->bo->cpu, srcImage->bo->cpu, sz);
 }
 
 void vkCmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image, uint32_t imageLayout,
