@@ -2345,6 +2345,7 @@ static void command_buffer_apply_attributes(VkCommandBuffer commandBuffer) {
 }
 
 void vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
+    PANVK_LOG("vkCmdDraw: cb=%p v9_cmd=%p vertCount=%u\n", (void*)commandBuffer, commandBuffer ? (void*)commandBuffer->v9_cmd : NULL, vertexCount);
     if (commandBuffer && commandBuffer->v9_cmd && vertexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
@@ -2467,6 +2468,8 @@ void vkCmdEndRenderPass2KHR(VkCommandBuffer commandBuffer, const void *pSubpassE
 }
 
 void vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+    PANVK_LOG("vkCmdDrawIndexed: cb=%p v9_cmd=%p idxCount=%u instCount=%u\n",
+              (void*)commandBuffer, commandBuffer ? (void*)commandBuffer->v9_cmd : NULL, indexCount, instanceCount);
     if (commandBuffer && commandBuffer->v9_cmd && indexCount > 0 && instanceCount > 0 &&
         (!commandBuffer->graphics_pipeline ||
          !commandBuffer->graphics_pipeline->rasterizer_discard)) {
@@ -2527,19 +2530,22 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
         for (uint32_t s = 0; s < submitCount; s++) {
             for (uint32_t cb = 0; cb < pSubmits[s].commandBufferCount; cb++) {
                 VkCommandBuffer cmd = pSubmits[s].pCommandBuffers[cb];
-                if (cmd && cmd->v9_cmd) {
-                    if (queue->last_v9_cmd != cmd->v9_cmd) {
-                        v9_cmd_buffer_destroy(queue->last_v9_cmd);
-                        queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
-                    }
-                    v9_cmd_buffer_submit(cmd->v9_cmd);
-                    void *color = v9_cmd_buffer_get_color_cpu(cmd->v9_cmd);
-                    if (color && queue->device) {
-                        queue->device->last_rendered_color = color;
-                    }
-                    if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo) {
-                        size_t sz = (size_t)cmd->target_swapchain_image->width * cmd->target_swapchain_image->height * 4;
-                        memcpy(cmd->target_swapchain_image->bo->cpu, color, sz);
+                if (cmd) {
+                    PANVK_LOG("vkQueueSubmit: submit[%u].cb[%u]=%p v9_cmd=%p\n", s, cb, (void*)cmd, (void*)cmd->v9_cmd);
+                    if (cmd->v9_cmd) {
+                        if (queue->last_v9_cmd != cmd->v9_cmd) {
+                            v9_cmd_buffer_destroy(queue->last_v9_cmd);
+                            queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
+                        }
+                        v9_cmd_buffer_submit(cmd->v9_cmd);
+                        void *color = v9_cmd_buffer_get_color_cpu(cmd->v9_cmd);
+                        if (color && queue->device) {
+                            queue->device->last_rendered_color = color;
+                        }
+                        if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo) {
+                            size_t sz = (size_t)cmd->target_swapchain_image->width * cmd->target_swapchain_image->height * 4;
+                            memcpy(cmd->target_swapchain_image->bo->cpu, color, sz);
+                        }
                     }
                 }
             }
@@ -2903,12 +2909,19 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
         color_cpu = sc->images[img_idx].bo->cpu;
     }
 
-    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p img_idx=%u image_data=%p last_cmd=%p color_cpu=%p\n",
+    uint32_t sample0 = 0, sample_mid = 0;
+    if (color_cpu) {
+        sample0 = *(uint32_t *)color_cpu;
+        uint32_t total_px = (sc ? sc->width * sc->height : 0);
+        if (total_px > 0) sample_mid = ((uint32_t *)color_cpu)[total_px / 2];
+    }
+
+    PANVK_LOG("vkQueuePresentKHR: sc=%p surface=%p img_idx=%u image_data=%p last_cmd=%p color_cpu=%p pix[0]=0x%08x pix[mid]=0x%08x\n",
               (void*)sc,
               sc ? (void*)sc->surface : NULL,
               img_idx,
               sc ? sc->image_data : NULL,
-              (void*)last_cmd, color_cpu);
+              (void*)last_cmd, color_cpu, sample0, sample_mid);
 
     if (sc && sc->surface && (uintptr_t)sc->surface > 0x1000 && sc->image_data) {
         if (color_cpu) {
