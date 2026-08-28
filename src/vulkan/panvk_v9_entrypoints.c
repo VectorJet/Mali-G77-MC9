@@ -78,6 +78,7 @@ struct VkDevice_T {
     struct VkQueue_T *queue;
     struct VkDeviceMemory_T *memories;
     pthread_mutex_t mem_mutex;
+    void *last_rendered_color;
 };
 
 struct VkQueue_T {
@@ -109,6 +110,7 @@ struct VkCommandBuffer_T {
     struct VkBuffer_T *index_buffer;
     VkDeviceSize index_offset;
     uint32_t index_type;
+    struct VkImage_T *target_swapchain_image;
 };
 
 struct VkSurfaceKHR_T {
@@ -2407,6 +2409,14 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         .clear_color = clear_color,
     };
 
+    commandBuffer->target_swapchain_image = NULL;
+    if (fb && fb->attachment_count > 0 && fb->attachments && fb->attachments[0]) {
+        VkImageView view = fb->attachments[0];
+        if (view && view->image && view->image->swapchain) {
+            commandBuffer->target_swapchain_image = view->image;
+        }
+    }
+
     if (commandBuffer->v9_cmd) {
         v9_cmd_buffer_destroy(commandBuffer->v9_cmd);
     }
@@ -2523,6 +2533,14 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
                         queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
                     }
                     v9_cmd_buffer_submit(cmd->v9_cmd);
+                    void *color = v9_cmd_buffer_get_color_cpu(cmd->v9_cmd);
+                    if (color && queue->device) {
+                        queue->device->last_rendered_color = color;
+                    }
+                    if (color && cmd->target_swapchain_image && cmd->target_swapchain_image->bo) {
+                        size_t sz = (size_t)cmd->target_swapchain_image->width * cmd->target_swapchain_image->height * 4;
+                        memcpy(cmd->target_swapchain_image->bo->cpu, color, sz);
+                    }
                 }
             }
         }
@@ -2878,6 +2896,9 @@ VkResult vkQueuePresentKHR(VkQueue queue, const struct VkPresentInfoKHR *pPresen
     struct v9_cmd_buffer *last_cmd = queue ? queue->last_v9_cmd : NULL;
     void *color_cpu = last_cmd ? v9_cmd_buffer_get_color_cpu(last_cmd) : NULL;
 
+    if (!color_cpu && queue && queue->device && queue->device->last_rendered_color) {
+        color_cpu = queue->device->last_rendered_color;
+    }
     if (!color_cpu && sc && img_idx < sc->image_count && sc->images[img_idx].bo) {
         color_cpu = sc->images[img_idx].bo->cpu;
     }
