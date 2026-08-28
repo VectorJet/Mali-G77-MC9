@@ -242,10 +242,8 @@ void v9_cmd_buffer_destroy(struct v9_cmd_buffer *cmd) {
     free(cmd);
 }
 
-int v9_cmd_buffer_set_config(struct v9_cmd_buffer *cmd, const struct v9_render_target_config *config) {
-    if (!cmd || !config) return -EINVAL;
-    cmd->config = *config;
-    return 0;
+void v9_cmd_buffer_set_config(struct v9_cmd_buffer *cmd, const struct v9_render_target_config *config) {
+    if (cmd && config) cmd->config = *config;
 }
 
 int v9_cmd_buffer_begin(struct v9_cmd_buffer *cmd) {

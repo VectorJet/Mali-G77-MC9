@@ -2439,25 +2439,26 @@ void vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
         }
     }
 
-    if (commandBuffer->v9_cmd) {
-        v9_cmd_buffer_destroy(commandBuffer->v9_cmd);
-        commandBuffer->v9_cmd = NULL;
+    if (!commandBuffer->v9_cmd) {
+        struct pan_kmod_dev *kdev = (commandBuffer->device && commandBuffer->device->kdev) ?
+                                    commandBuffer->device->kdev : g_global_kdev;
+        if (!kdev) {
+            g_global_kdev = pan_kmod_dev_create(NULL);
+            kdev = g_global_kdev;
+        }
+        if (kdev) {
+            commandBuffer->v9_cmd = v9_cmd_buffer_create(kdev, &config);
+        }
+    } else {
+        v9_cmd_buffer_set_config(commandBuffer->v9_cmd, &config);
     }
-    struct pan_kmod_dev *kdev = (commandBuffer->device && commandBuffer->device->kdev) ?
-                                commandBuffer->device->kdev : g_global_kdev;
-    if (!kdev) {
-        g_global_kdev = pan_kmod_dev_create(NULL);
-        kdev = g_global_kdev;
-    }
-    if (kdev) {
-        commandBuffer->v9_cmd = v9_cmd_buffer_create(kdev, &config);
-    }
-    PANVK_LOG("vkCmdBeginRenderPass: cb=%p fb=%p kdev=%p -> v9_cmd=%p\n",
-              (void*)commandBuffer, (void*)pRenderPassBegin->framebuffer,
-              (void*)kdev, (void*)commandBuffer->v9_cmd);
+
     if (commandBuffer->v9_cmd) {
         v9_cmd_buffer_begin(commandBuffer->v9_cmd);
     }
+    PANVK_LOG("vkCmdBeginRenderPass: cb=%p fb=%p -> v9_cmd=%p (w=%u h=%u cc=0x%08x)\n",
+              (void*)commandBuffer, (void*)pRenderPassBegin->framebuffer,
+              (void*)commandBuffer->v9_cmd, fb_width, fb_height, clear_color);
 }
 
 void vkCmdNextSubpass(VkCommandBuffer commandBuffer, uint32_t contents) {
@@ -2565,10 +2566,7 @@ VkResult vkQueueSubmit(VkQueue queue, uint32_t submitCount, const struct VkSubmi
                 if (cmd) {
                     PANVK_LOG("vkQueueSubmit: submit[%u].cb[%u]=%p v9_cmd=%p\n", s, cb, (void*)cmd, (void*)cmd->v9_cmd);
                     if (cmd->v9_cmd) {
-                        if (queue->last_v9_cmd != cmd->v9_cmd) {
-                            v9_cmd_buffer_destroy(queue->last_v9_cmd);
-                            queue->last_v9_cmd = v9_cmd_buffer_ref(cmd->v9_cmd);
-                        }
+                        queue->last_v9_cmd = cmd->v9_cmd;
                         v9_cmd_buffer_submit(cmd->v9_cmd);
                         void *color = v9_cmd_buffer_get_color_cpu(cmd->v9_cmd);
                         if (color && queue->device) {
