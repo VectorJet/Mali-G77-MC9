@@ -16,17 +16,19 @@
 #include "panvk_v9_compiler.h"
 
 #define ICD_LOADER_MAGIC 0x01CDC0DEu
-#define PANVK_LOG(...) do { if (getenv("PANVK_DEBUG")) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
+
+#ifdef ANDROID
+#include <android/log.h>
+#define PANVK_LOG(...) do { __android_log_print(ANDROID_LOG_INFO, "PANVK", __VA_ARGS__); } while(0)
+#else
+#define PANVK_LOG(...) do { fprintf(stderr, __VA_ARGS__); fflush(stderr); } while(0)
+#endif
 
 static inline void panvk_trace(const char *func, const char *extra) {
-    FILE *f = fopen("/tmp/panvk_trace.log", "a");
-    if (!f) f = fopen("/data/user/0/com.winlator.mali/files/imagefs/tmp/panvk_trace.log", "a");
-    if (!f) f = fopen("/sdcard/Download/panvk_trace.log", "a");
-    if (f) {
-        if (extra) fprintf(f, "%s: %s\n", func, extra);
-        else fprintf(f, "%s\n", func);
-        fflush(f);
-        fclose(f);
+    if (extra) {
+        PANVK_LOG("[TRACE] %s: %s\n", func, extra);
+    } else {
+        PANVK_LOG("[TRACE] %s\n", func);
     }
 }
 
@@ -3141,6 +3143,201 @@ VkResult vkEnumeratePhysicalDeviceGroupsKHR(VkInstance instance, uint32_t *pPhys
     return vkEnumeratePhysicalDeviceGroups(instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroups);
 }
 
+/* ========== Additional Functions required by DXVK / Vulkan Loader ========== */
+void vkCmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
+                        uint32_t stageFlags, uint32_t offset, uint32_t size,
+                        const void *pValues) {
+    (void)commandBuffer; (void)layout; (void)stageFlags; (void)offset; (void)size; (void)pValues;
+}
+
+void vkGetImageSubresourceLayout(VkDevice device, VkImage image,
+                                 const void *pSubresource, void *pLayout) {
+    (void)device; (void)pSubresource;
+    if (!pLayout) return;
+    struct VkSubresourceLayout_T {
+        VkDeviceSize offset;
+        VkDeviceSize size;
+        VkDeviceSize rowPitch;
+        VkDeviceSize arrayPitch;
+        VkDeviceSize depthPitch;
+    } *l = (struct VkSubresourceLayout_T *)pLayout;
+    memset(l, 0, sizeof(*l));
+    if (image) {
+        uint32_t w = image->width > 0 ? image->width : 1;
+        uint32_t h = image->height > 0 ? image->height : 1;
+        l->rowPitch = w * 4;
+        l->size = image->bo ? image->bo->size : (VkDeviceSize)w * h * 4;
+        l->arrayPitch = l->size;
+        l->depthPitch = l->size;
+    }
+}
+
+void vkCmdResolveImage(VkCommandBuffer commandBuffer, VkImage srcImage, uint32_t srcImageLayout,
+                       VkImage dstImage, uint32_t dstImageLayout, uint32_t regionCount,
+                       const void *pRegions) {
+    (void)commandBuffer; (void)srcImage; (void)srcImageLayout; (void)dstImage; (void)dstImageLayout; (void)regionCount; (void)pRegions;
+}
+
+void vkGetRenderAreaGranularity(VkDevice device, VkRenderPass renderPass, struct VkExtent2D *pGranularity) {
+    (void)device; (void)renderPass;
+    if (pGranularity) {
+        pGranularity->width = 1;
+        pGranularity->height = 1;
+    }
+}
+
+VkResult vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipelineCache, size_t *pDataSize, void *pData) {
+    (void)device; (void)pipelineCache;
+    if (!pDataSize) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!pData) {
+        *pDataSize = 0;
+        return VK_SUCCESS;
+    }
+    return VK_SUCCESS;
+}
+
+VkResult vkMergePipelineCaches(VkDevice device, VkPipelineCache dstCache, uint32_t srcCacheCount, const VkPipelineCache *pSrcCaches) {
+    (void)device; (void)dstCache; (void)srcCacheCount; (void)pSrcCaches;
+    return VK_SUCCESS;
+}
+
+void vkGetImageSparseMemoryRequirements(VkDevice device, VkImage image, uint32_t *pRequirementsCount, void *pRequirements) {
+    (void)device; (void)image; (void)pRequirements;
+    if (pRequirementsCount) *pRequirementsCount = 0;
+}
+
+void vkGetImageSparseMemoryRequirements2(VkDevice device, const void *pInfo, uint32_t *pRequirementsCount, void *pRequirements) {
+    (void)device; (void)pInfo; (void)pRequirements;
+    if (pRequirementsCount) *pRequirementsCount = 0;
+}
+
+void vkGetImageSparseMemoryRequirements2KHR(VkDevice device, const void *pInfo, uint32_t *pRequirementsCount, void *pRequirements) {
+    vkGetImageSparseMemoryRequirements2(device, pInfo, pRequirementsCount, pRequirements);
+}
+
+VkResult vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount, const void *pBindInfo, VkFence fence) {
+    (void)queue; (void)bindInfoCount; (void)pBindInfo;
+    if (fence) ((VkFence)fence)->signaled = true;
+    return VK_SUCCESS;
+}
+
+void vkCmdBindVertexBuffers2EXT(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
+                               const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+                               const VkDeviceSize *pSizes, const VkDeviceSize *pStrides) {
+    (void)pSizes; (void)pStrides;
+    vkCmdBindVertexBuffers(cb, firstBinding, bindingCount, pBuffers, pOffsets);
+}
+
+void vkCmdSetScissorWithCountEXT(VkCommandBuffer cb, uint32_t scissorCount, const void *pScissors) {
+    (void)cb; (void)scissorCount; (void)pScissors;
+}
+
+void vkCmdSetViewportWithCountEXT(VkCommandBuffer cb, uint32_t viewportCount, const void *pViewports) {
+    (void)cb; (void)viewportCount; (void)pViewports;
+}
+
+void vkCmdDrawIndirectCountKHR(VkCommandBuffer cb, VkBuffer buffer, VkDeviceSize offset,
+                               VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+                               uint32_t maxDrawCount, uint32_t stride) {
+    (void)cb; (void)buffer; (void)offset; (void)countBuffer; (void)countBufferOffset; (void)maxDrawCount; (void)stride;
+}
+
+void vkCmdDrawIndexedIndirectCountKHR(VkCommandBuffer cb, VkBuffer buffer, VkDeviceSize offset,
+                                      VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+                                      uint32_t maxDrawCount, uint32_t stride) {
+    (void)cb; (void)buffer; (void)offset; (void)countBuffer; (void)countBufferOffset; (void)maxDrawCount; (void)stride;
+}
+
+void vkResetQueryPoolEXT(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery, uint32_t queryCount) {
+    (void)device; (void)queryPool; (void)firstQuery; (void)queryCount;
+}
+
+void vkCmdBeginConditionalRenderingEXT(VkCommandBuffer cb, const void *pConditionalRenderingBegin) {
+    (void)cb; (void)pConditionalRenderingBegin;
+}
+
+void vkCmdEndConditionalRenderingEXT(VkCommandBuffer cb) {
+    (void)cb;
+}
+
+void vkGetPhysicalDeviceSparseImageFormatProperties2(VkPhysicalDevice physicalDevice, const void *pFormatInfo, uint32_t *pPropertyCount, void *pProperties) {
+    (void)physicalDevice; (void)pFormatInfo; (void)pProperties;
+    if (pPropertyCount) *pPropertyCount = 0;
+}
+
+void vkGetPhysicalDeviceSparseImageFormatProperties2KHR(VkPhysicalDevice physicalDevice, const void *pFormatInfo, uint32_t *pPropertyCount, void *pProperties) {
+    vkGetPhysicalDeviceSparseImageFormatProperties2(physicalDevice, pFormatInfo, pPropertyCount, pProperties);
+}
+
+void vkGetDeviceQueue2(VkDevice device, const void *pQueueInfo, VkQueue *pQueue) {
+    if (!device || !pQueueInfo || !pQueue) return;
+    uint32_t family = *(const uint32_t *)((const uint8_t *)pQueueInfo + 20);
+    uint32_t index = *(const uint32_t *)((const uint8_t *)pQueueInfo + 24);
+    vkGetDeviceQueue(device, family, index, pQueue);
+}
+
+VkResult vkGetPhysicalDeviceSurfacePresentModes2EXT(VkPhysicalDevice physicalDevice, const void *pSurfaceInfo, uint32_t *pPresentModeCount, void *pPresentModes) {
+    (void)physicalDevice; (void)pSurfaceInfo; (void)pPresentModes;
+    if (pPresentModeCount) *pPresentModeCount = 0;
+    return VK_SUCCESS;
+}
+
+VkResult vkAcquireFullScreenExclusiveModeEXT(VkDevice device, VkSwapchainKHR swapchain) {
+    (void)device; (void)swapchain;
+    return VK_SUCCESS;
+}
+
+VkResult vkReleaseFullScreenExclusiveModeEXT(VkDevice device, VkSwapchainKHR swapchain) {
+    (void)device; (void)swapchain;
+    return VK_SUCCESS;
+}
+
+VkResult vkGetDeviceGroupSurfacePresentModes2EXT(VkDevice device, const void *pSurfaceInfo, void *pModes) {
+    (void)device; (void)pSurfaceInfo; (void)pModes;
+    return VK_SUCCESS;
+}
+
+uint32_t vkGetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, void *dpy, unsigned long visualID) {
+    (void)physicalDevice; (void)queueFamilyIndex; (void)dpy; (void)visualID;
+    return 1;
+}
+
+VkResult vkCreateWaylandSurfaceKHR(VkInstance instance, const void *pCreateInfo, void *pAllocator, void **pSurface) {
+    (void)instance; (void)pCreateInfo; (void)pAllocator;
+    if (pSurface) *pSurface = (void *)0x1;
+    return VK_SUCCESS;
+}
+
+uint32_t vkGetPhysicalDeviceWaylandPresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex, void *display) {
+    (void)physicalDevice; (void)queueFamilyIndex; (void)display;
+    return 1;
+}
+
+VkResult vkCreateWin32SurfaceKHR(VkInstance instance, const void *pCreateInfo, void *pAllocator, void **pSurface) {
+    (void)instance; (void)pCreateInfo; (void)pAllocator;
+    if (pSurface) *pSurface = (void *)0x1;
+    return VK_SUCCESS;
+}
+
+uint32_t vkGetPhysicalDeviceWin32PresentationSupportKHR(VkPhysicalDevice physicalDevice, uint32_t queueFamilyIndex) {
+    (void)physicalDevice; (void)queueFamilyIndex;
+    return 1;
+}
+
+VkResult vkCreateDebugReportCallbackEXT(VkInstance instance, const void *pCreateInfo, void *pAllocator, void **pCallback) {
+    (void)instance; (void)pCreateInfo; (void)pAllocator;
+    if (pCallback) *pCallback = (void *)0x1;
+    return VK_SUCCESS;
+}
+
+void vkDestroyDebugReportCallbackEXT(VkInstance instance, void *callback, void *pAllocator) {
+    (void)instance; (void)callback; (void)pAllocator;
+}
+
+void vkDebugReportMessageEXT(VkInstance instance, uint32_t flags, uint32_t objectType, uint64_t object, size_t location, int32_t messageCode, const char *pLayerPrefix, const char *pMessage) {
+    (void)instance; (void)flags; (void)objectType; (void)object; (void)location; (void)messageCode; (void)pLayerPrefix; (void)pMessage;
+}
+
 /* Vulkan ICD Entry Point Lookup Table */
 __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName) {
     if (!pName) return NULL;
@@ -3177,9 +3374,12 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkGetPhysicalDeviceImageFormatProperties2);
     MATCH(vkGetPhysicalDeviceImageFormatProperties2KHR);
     MATCH(vkGetPhysicalDeviceSparseImageFormatProperties);
+    MATCH(vkGetPhysicalDeviceSparseImageFormatProperties2);
+    MATCH(vkGetPhysicalDeviceSparseImageFormatProperties2KHR);
     MATCH(vkCreateDevice);
     MATCH(vkDestroyDevice);
     MATCH(vkGetDeviceQueue);
+    MATCH(vkGetDeviceQueue2);
     MATCH(vkAllocateMemory);
     MATCH(vkFreeMemory);
     MATCH(vkMapMemory);
@@ -3197,6 +3397,11 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkGetImageMemoryRequirements);
     MATCH(vkGetImageMemoryRequirements2);
     MATCH(vkGetImageMemoryRequirements2KHR);
+    MATCH(vkGetImageSparseMemoryRequirements);
+    MATCH(vkGetImageSparseMemoryRequirements2);
+    MATCH(vkGetImageSparseMemoryRequirements2KHR);
+    MATCH(vkQueueBindSparse);
+    MATCH(vkGetImageSubresourceLayout);
     MATCH(vkBindImageMemory);
     MATCH(vkBindImageMemory2);
     MATCH(vkBindImageMemory2KHR);
@@ -3206,12 +3411,15 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkDestroyShaderModule);
     MATCH(vkCreatePipelineCache);
     MATCH(vkDestroyPipelineCache);
+    MATCH(vkGetPipelineCacheData);
+    MATCH(vkMergePipelineCaches);
     MATCH(vkCreatePipelineLayout);
     MATCH(vkDestroyPipelineLayout);
     MATCH(vkCreateRenderPass);
     MATCH(vkCreateRenderPass2);
     MATCH(vkCreateRenderPass2KHR);
     MATCH(vkDestroyRenderPass);
+    MATCH(vkGetRenderAreaGranularity);
     MATCH(vkCreateFramebuffer);
     MATCH(vkDestroyFramebuffer);
     MATCH(vkCreateDescriptorSetLayout);
@@ -3265,6 +3473,8 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkCmdClearColorImage);
     MATCH(vkCmdClearDepthStencilImage);
     MATCH(vkCmdClearAttachments);
+    MATCH(vkCmdResolveImage);
+    MATCH(vkCmdPushConstants);
     MATCH(vkCmdPipelineBarrier);
     MATCH(vkCmdPipelineBarrier2);
     MATCH(vkCmdPipelineBarrier2KHR);
@@ -3283,7 +3493,9 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkCmdDispatchIndirect);
     MATCH(vkCmdDispatchBase);
     MATCH(vkCmdDrawIndirect);
+    MATCH(vkCmdDrawIndirectCountKHR);
     MATCH(vkCmdDrawIndexedIndirect);
+    MATCH(vkCmdDrawIndexedIndirectCountKHR);
     MATCH(vkCmdFillBuffer);
     MATCH(vkCmdUpdateBuffer);
     MATCH(vkCmdSetDepthBias);
@@ -3306,6 +3518,7 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkCmdBeginQuery);
     MATCH(vkCmdEndQuery);
     MATCH(vkCmdResetQueryPool);
+    MATCH(vkResetQueryPoolEXT);
     MATCH(vkCmdWriteTimestamp);
     MATCH(vkCmdWriteTimestamp2);
     MATCH(vkCmdWriteTimestamp2KHR);
@@ -3326,6 +3539,11 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkCmdSetDepthBoundsTestEnableEXT);
     MATCH(vkCmdSetStencilTestEnableEXT);
     MATCH(vkCmdSetStencilOpEXT);
+    MATCH(vkCmdBindVertexBuffers2EXT);
+    MATCH(vkCmdSetScissorWithCountEXT);
+    MATCH(vkCmdSetViewportWithCountEXT);
+    MATCH(vkCmdBeginConditionalRenderingEXT);
+    MATCH(vkCmdEndConditionalRenderingEXT);
     MATCH(vkQueueSubmit);
     MATCH(vkQueueSubmit2);
     MATCH(vkQueueSubmit2KHR);
@@ -3363,7 +3581,15 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkGetDeviceMemoryOpaqueCaptureAddressKHR);
     MATCH(vkCreateXlibSurfaceKHR);
     MATCH(vkCreateXcbSurfaceKHR);
+    MATCH(vkGetPhysicalDeviceXlibPresentationSupportKHR);
     MATCH(vkGetPhysicalDeviceXcbPresentationSupportKHR);
+    MATCH(vkCreateWaylandSurfaceKHR);
+    MATCH(vkGetPhysicalDeviceWaylandPresentationSupportKHR);
+    MATCH(vkCreateWin32SurfaceKHR);
+    MATCH(vkGetPhysicalDeviceWin32PresentationSupportKHR);
+    MATCH(vkCreateDebugReportCallbackEXT);
+    MATCH(vkDestroyDebugReportCallbackEXT);
+    MATCH(vkDebugReportMessageEXT);
     MATCH(vkGetPhysicalDeviceDisplayPropertiesKHR);
     MATCH(vkGetPhysicalDeviceDisplayPlanePropertiesKHR);
     MATCH(vkGetDisplayPlaneSupportedDisplaysKHR);
@@ -3376,6 +3602,10 @@ __attribute__((visibility("default"))) PFN_vkVoidFunction vkGetInstanceProcAddr(
     MATCH(vkGetPhysicalDeviceSurfaceFormatsKHR);
     MATCH(vkGetPhysicalDeviceSurfaceFormats2KHR);
     MATCH(vkGetPhysicalDeviceSurfacePresentModesKHR);
+    MATCH(vkGetPhysicalDeviceSurfacePresentModes2EXT);
+    MATCH(vkAcquireFullScreenExclusiveModeEXT);
+    MATCH(vkReleaseFullScreenExclusiveModeEXT);
+    MATCH(vkGetDeviceGroupSurfacePresentModes2EXT);
     MATCH(vkCreateSwapchainKHR);
     MATCH(vkDestroySwapchainKHR);
     MATCH(vkGetSwapchainImagesKHR);
