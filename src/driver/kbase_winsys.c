@@ -149,11 +149,12 @@ struct kbase_bo *kbase_bo_alloc(struct kbase_dev *dev, size_t size, uint32_t fla
 
     int prot = PROT_READ | PROT_WRITE;
 
-    void *hint = (void *)(uintptr_t)next_hint_va;
-    next_hint_va += aligned_size;
-    if (next_hint_va > 0x70000000ULL) {
-        next_hint_va = 0x20000000ULL;
+    uint64_t my_hint = __sync_fetch_and_add(&next_hint_va, aligned_size);
+    if (my_hint > 0x70000000ULL) {
+        my_hint = 0x20000000ULL;
+        next_hint_va = 0x20000000ULL + aligned_size;
     }
+    void *hint = (void *)(uintptr_t)my_hint;
 
     void *cpu_ptr = mmap(hint, aligned_size, prot, MAP_SHARED, dev->fd, (off_t)mem[1]);
     if (cpu_ptr == MAP_FAILED) {

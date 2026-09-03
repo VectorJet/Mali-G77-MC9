@@ -11,3 +11,4 @@ src/vulkan/test_combined_steps1_4
 a.out
 src/kbase/test_dma_heap_import
 T-*.json
+scratch/
